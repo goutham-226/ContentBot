@@ -19,7 +19,8 @@ import { ORIGINALITY_RULE, styleFor } from './character.ts';
 import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
 import {
-  cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, MODELS, uploadFile, VIDEO_LIMITS,
+  cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS, uploadFile,
+  VIDEO_LIMITS, withFallback,
 } from './replicate.ts';
 import { mediaSeconds, stitchClips } from './stitch.ts';
 import { charge, OutOfCreditsError, PRICES, refundRun } from './credits.ts';
@@ -237,7 +238,13 @@ async function claimAndRun() {
   }, HEARTBEAT_MS);
 
   // Watch for the user cancelling: stop new work and cancel Replicate jobs in flight.
-  const ctx = { runId: run.id, canceled: false, predictions: new Set<string>(), shuttingDown: false };
+  const ctx = {
+    runId: run.id,
+    canceled: false,
+    predictions: new Set<string>(),
+    shuttingDown: false,
+    notify: (title: string, detail: string) => step(run.id, 'think', title, detail),
+  };
   running.set(run.id, ctx);
   const watcher = setInterval(() => {
     pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [run.id])
@@ -326,25 +333,30 @@ function persona(bot: BotContext): string {
   ].join('\n');
 }
 
-// Asks for JSON and parses it, retrying once if the model wraps or breaks it.
+// Asks for JSON and parses it, retrying once if the model wraps or breaks it,
+// then falling back to the backup LLM.
 async function askJson(prompt: string, maxTokens = 2048): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const text = await generateText(
-      attempt === 0 ? prompt : `${prompt}\n\nYour last answer wasn't valid JSON. Reply with the JSON object only.`,
-      maxTokens,
-    );
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start !== -1 && end > start) {
-      try {
-        const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-        if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>;
-      } catch {
-        // retry
+  return withFallback(LLM_CHAIN, 'writing', async (model) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const text = await generateText(
+        attempt === 0 ? prompt : `${prompt}\n\nYour last answer wasn't valid JSON. Reply with the JSON object only.`,
+        maxTokens,
+        model,
+      );
+      const start = text.indexOf('{');
+      const end = text.lastIndexOf('}');
+      if (start !== -1 && end > start) {
+        try {
+          const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+          if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>;
+        } catch {
+          // retry
+        }
       }
+      console.warn(`${model} gave unusable JSON (${text.length} chars): …${text.slice(-200)}`);
     }
-  }
-  throw new Error(`${MODELS.llm} didn’t return a usable answer.`);
+    throw new Error(`${model} didn’t return a usable answer.`);
+  });
 }
 
 const str = (v: unknown, fallback = '') => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
@@ -476,7 +488,7 @@ Below are top-performing articles, summaries of popular books and recent headlin
 ${material}
 
 What made these perform well, and what is worth using? Reply with JSON only:
-{"takeaways": ["4-6 specific, surprising facts, stats or story beats worth using, most jaw-dropping first"], "whyTheyWorked": "2-3 sentences on the patterns behind their success", "bookInsights": ["2-4 ideas from the books worth using"]}`, 1500),
+{"takeaways": ["4-6 specific, surprising facts, stats or story beats worth using, most jaw-dropping first"], "whyTheyWorked": "2-3 sentences on the patterns behind their success", "bookInsights": ["2-4 ideas from the books worth using"]}`, 4000),
   ]);
   await step(run.id, 'think', `Saved ${chunkCount} passages to the knowledge base`);
 

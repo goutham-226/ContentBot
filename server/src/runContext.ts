@@ -6,6 +6,7 @@ export type RunContext = {
   runId: string;
   canceled: boolean;
   predictions: Set<string>; // Replicate prediction ids still running
+  notify?: (title: string, detail: string) => Promise<void>; // shows a note in the run's thinking trail
 };
 
 export const runContext = new AsyncLocalStorage<RunContext>();

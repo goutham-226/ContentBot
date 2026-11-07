@@ -17,9 +17,60 @@ export const MODELS = {
   embedding: 'replicate/all-mpnet-base-v2',
 };
 
+// Backups, tried in order when a model fails.
+export const BACKUPS = {
+  llm: ['deepseek-ai/deepseek-v3.1'],
+  // Another FLUX, then Pruna (P-Image Edit with references, P-Image without).
+  image: ['black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
+  // Pruna's reference-to-video model (built on MiniMax H3, same reference
+  // limits), only after MiniMax has failed VIDEO_TRIES times.
+  video: ['prunaai/p-video-2-pro-reference'],
+};
+const VIDEO_TRIES = 2;
+
 const EMBED_BATCH = 32;
 
 export class ReplicateError extends Error {}
+
+// Failures another model can't fix: no token, a bad token, or no Replicate credit.
+function isAccountProblem(err: unknown): boolean {
+  return err instanceof ReplicateError
+    && /^Replicate (isn’t set up|returned 40[12])/.test(err.message);
+}
+
+const shortName = (model: string) => model.split('/')[1] ?? model;
+
+// Runs `job` on each model in turn (each `tries` times), moving on only when
+// the model itself fails. Each switch shows up in the run's thinking trail.
+export async function withFallback<T>(
+  chain: { model: string; tries: number }[],
+  task: string,
+  job: (model: string) => Promise<T>,
+): Promise<T> {
+  let lastError: unknown = new ReplicateError(`No model available for ${task}.`);
+  for (const [i, { model, tries }] of chain.entries()) {
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try {
+        return await job(model);
+      } catch (err) {
+        if (err instanceof CanceledError || isAccountProblem(err)) throw err;
+        lastError = err;
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`${model} failed (${task}, try ${attempt}/${tries}): ${reason}`);
+        const next = attempt < tries ? model : chain[i + 1]?.model;
+        if (next) {
+          await runContext.getStore()?.notify?.(
+            next === model
+              ? `${shortName(model)} failed ${task}, trying again`
+              : `${shortName(model)} failed ${task}, switching to ${shortName(next)}`,
+            reason,
+          ).catch(() => {});
+        }
+      }
+    }
+  }
+  throw lastError;
+}
 
 type Prediction = {
   id: string;
@@ -161,7 +212,7 @@ export async function download(url: string): Promise<{ data: Buffer; contentType
 
 // Gemini names its length limit differently and can "think" first; thinking is
 // off because these prompts are structured extraction and writing, and it
-// keeps runs fast and cheap. Other models (e.g. Qwen) take max_tokens.
+// keeps runs fast and cheap. Other models (e.g. DeepSeek) take max_tokens.
 function textInput(model: string, prompt: string, maxTokens: number): Record<string, unknown> {
   if (model.startsWith('google/gemini')) {
     return { prompt, max_output_tokens: maxTokens, temperature: 0.7, thinking_budget: 0 };
@@ -169,8 +220,12 @@ function textInput(model: string, prompt: string, maxTokens: number): Record<str
   return { prompt, max_tokens: maxTokens, temperature: 0.7 };
 }
 
-export async function generateText(prompt: string, maxTokens = 2048): Promise<string> {
-  const output = await predict(MODELS.llm, textInput(MODELS.llm, prompt, maxTokens), 5 * 60_000);
+// The LLM first, then its backups. Callers that check the answer (e.g. for
+// valid JSON) pass their own job to withFallback with this chain.
+export const LLM_CHAIN = [MODELS.llm, ...BACKUPS.llm].map((model) => ({ model, tries: 1 }));
+
+export async function generateText(prompt: string, maxTokens = 2048, model = MODELS.llm): Promise<string> {
+  const output = await predict(model, textInput(model, prompt, maxTokens), 5 * 60_000);
   return Array.isArray(output) ? output.join('') : String(output ?? '');
 }
 
@@ -181,9 +236,13 @@ function imageInput(model: string, prompt: string, references: string[], aspectR
       prompt,
       ...(references.length > 0 && { images: references.slice(0, 5) }),
       aspect_ratio: aspectRatio,
-      output_megapixels: String(megapixels),
+      // 4B calls it output_megapixels, 9B megapixels.
+      [model.endsWith('-4b') ? 'output_megapixels' : 'megapixels']: String(megapixels),
       output_format: 'jpg',
     };
+  }
+  if (model === 'prunaai/p-image-edit' || model === 'prunaai/p-image') {
+    return { prompt, aspect_ratio: aspectRatio, ...(references.length > 0 && { images: references.slice(0, 5) }) };
   }
   if (model.includes('flux-2')) {
     return {
@@ -212,10 +271,16 @@ export async function generateImage(
   aspectRatio = '9:16',
   megapixels: 1 | 2 = 1,
 ): Promise<string> {
-  const output = await predict(MODELS.image, imageInput(MODELS.image, prompt, references, aspectRatio, megapixels), 5 * 60_000);
-  const url = Array.isArray(output) ? output[0] : output;
-  if (typeof url !== 'string') throw new ReplicateError('The image model returned no image.');
-  return url;
+  // P-Image Edit needs references; P-Image draws from the prompt alone.
+  const chain = [MODELS.image, ...BACKUPS.image]
+    .map((model) => (model === 'prunaai/p-image-edit' && references.length === 0 ? 'prunaai/p-image' : model))
+    .map((model) => ({ model, tries: 1 }));
+  return withFallback(chain, 'drawing an image', async (model) => {
+    const output = await predict(model, imageInput(model, prompt, references, aspectRatio, megapixels), 5 * 60_000);
+    const url = Array.isArray(output) ? output[0] : output;
+    if (typeof url !== 'string') throw new ReplicateError(`${model} returned no image.`);
+    return url;
+  });
 }
 
 // Returns the voiceover's (temporary) URL. Qwen3-TTS is the best value on
@@ -254,21 +319,39 @@ export async function generateVideo(
   duration: number,
 ): Promise<string> {
   const visual = references.images.length > 0 || references.videos.length > 0;
-  const output = await predict(
-    MODELS.video,
-    {
-      prompt,
-      duration,
-      ratio: '9:16',
-      ...(references.images.length > 0 && { reference_image_urls: references.images.slice(0, VIDEO_LIMITS.images) }),
-      ...(references.videos.length > 0 && { reference_video_urls: references.videos.slice(0, VIDEO_LIMITS.videos) }),
-      ...(visual && references.audio.length > 0 && { reference_audio_urls: references.audio.slice(0, VIDEO_LIMITS.audio) }),
-    },
-    20 * 60_000,
-  );
-  const url = Array.isArray(output) ? output[0] : output;
-  if (typeof url !== 'string') throw new ReplicateError('The video model returned no video.');
-  return url;
+  const images = references.images.slice(0, VIDEO_LIMITS.images);
+  const videos = references.videos.slice(0, VIDEO_LIMITS.videos);
+  const audio = visual ? references.audio.slice(0, VIDEO_LIMITS.audio) : [];
+  // Pruna needs at least one reference image or video.
+  const chain = [
+    { model: MODELS.video, tries: VIDEO_TRIES },
+    ...(visual ? BACKUPS.video.map((model) => ({ model, tries: 1 })) : []),
+  ];
+  return withFallback(chain, 'rendering the clip', async (model) => {
+    const input = model.startsWith('prunaai/')
+      ? {
+          prompt,
+          duration: Math.min(Math.max(duration, 5), 15),
+          aspect_ratio: '9:16',
+          resolution: '768p',
+          ...(images.length > 0 && { image: images }),
+          ...(videos.length > 0 && { video: videos }),
+          ...(audio.length > 0 && { audio }),
+        }
+      : {
+          prompt,
+          duration,
+          ratio: '9:16',
+          ...(images.length > 0 && { reference_image_urls: images }),
+          ...(videos.length > 0 && { reference_video_urls: videos }),
+          // MiniMax needs a reference image or video alongside any reference audio.
+          ...(audio.length > 0 && { reference_audio_urls: audio }),
+        };
+    const output = await predict(model, input, 20 * 60_000);
+    const url = Array.isArray(output) ? output[0] : output;
+    if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
+    return url;
+  });
 }
 
 export async function embed(texts: string[]): Promise<number[][]> {
