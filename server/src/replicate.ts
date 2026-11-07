@@ -47,12 +47,47 @@ async function api<T>(url: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
-async function predict(model: string, input: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
-  let prediction = await api<Prediction>(`${API_BASE}/models/${model}/predictions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Prefer: 'wait=60' },
-    body: JSON.stringify({ input }),
+// Replicate throttles low-credit accounts (6 predictions a minute, one at a
+// time). The first 429 switches prediction creation to one every
+// THROTTLED_GAP_MS, queued in order, and the request is retried.
+const THROTTLED_GAP_MS = 10_500;
+const MAX_THROTTLE_RETRIES = 12;
+let createGapMs = 0;
+let lastCreate = 0;
+let createQueue: Promise<void> = Promise.resolve();
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function createSlot(): Promise<void> {
+  createQueue = createQueue.then(async () => {
+    const wait = lastCreate + createGapMs - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastCreate = Date.now();
   });
+  return createQueue;
+}
+
+async function createPrediction(model: string, input: Record<string, unknown>): Promise<Prediction> {
+  for (let attempt = 0; ; attempt++) {
+    await createSlot();
+    try {
+      return await api<Prediction>(`${API_BASE}/models/${model}/predictions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Prefer: 'wait=60' },
+        body: JSON.stringify({ input }),
+      });
+    } catch (err) {
+      const throttled = err instanceof ReplicateError && err.message.startsWith('Replicate returned 429');
+      if (!throttled || attempt >= MAX_THROTTLE_RETRIES) throw err;
+      createGapMs = THROTTLED_GAP_MS;
+      const resetsIn = Number(/resets in ~(\d+)s/.exec(err.message)?.[1] ?? 10);
+      await sleep(resetsIn * 1000 + Math.random() * 1000);
+    }
+  }
+}
+
+async function predict(model: string, input: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  let prediction = await createPrediction(model, input);
 
   const deadline = Date.now() + timeoutMs;
   while (prediction.status === 'starting' || prediction.status === 'processing') {
