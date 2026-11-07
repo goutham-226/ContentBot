@@ -71,3 +71,30 @@ export async function grant(userId: string, cents: number, reason: string) {
     client.release();
   }
 }
+
+// Gives back everything a run has been charged (used when a run restarts from
+// scratch, so redoing its parts isn't charged twice).
+export async function refundRun(runId: string) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ user_id: string; charged: number }>(
+      `SELECT user_id, -SUM(amount_cents)::int AS charged FROM credit_ledger
+        WHERE run_id = $1 GROUP BY user_id HAVING SUM(amount_cents) < 0`,
+      [runId],
+    );
+    for (const { user_id: userId, charged } of rows) {
+      await client.query('UPDATE users SET credits_cents = credits_cents + $2 WHERE id = $1', [userId, charged]);
+      await client.query(
+        'INSERT INTO credit_ledger (user_id, run_id, amount_cents, reason) VALUES ($1, $2, $3, $4)',
+        [userId, runId, charged, 'Refund: run restarted'],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}

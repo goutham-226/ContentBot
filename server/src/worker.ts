@@ -22,7 +22,7 @@ import {
   cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, MODELS, uploadFile,
 } from './replicate.ts';
 import { stitchClips } from './stitch.ts';
-import { charge, OutOfCreditsError, PRICES } from './credits.ts';
+import { charge, OutOfCreditsError, PRICES, refundRun } from './credits.ts';
 import { CanceledError, runContext, throwIfCanceled } from './runContext.ts';
 import type { RunContext } from './runContext.ts';
 import { readArticle, searchGoogleNews, searchHackerNews } from './web.ts';
@@ -102,10 +102,14 @@ export type Production = {
 };
 
 let active = 0;
+let stopping = false;
+const timers: NodeJS.Timeout[] = [];
+const running = new Map<string, RunContext & { shuttingDown: boolean }>();
 
 // Claims at most one run per tick, up to CONCURRENCY at a time.
 export function startWorker() {
-  setInterval(() => {
+  timers.push(setInterval(() => {
+    if (stopping) return;
     if (active >= CONCURRENCY) return;
     active++;
     claimAndRun()
@@ -113,12 +117,33 @@ export function startWorker() {
       .finally(() => {
         active--;
       });
-  }, TICK_MS);
+  }, TICK_MS));
 
-  setInterval(() => {
+  timers.push(setInterval(() => {
     Promise.all([deleteExpiredKnowledge(), pruneColdRuns()])
       .catch((err: unknown) => console.error('Cleanup failed:', err));
-  }, CLEANUP_EVERY_MS);
+  }, CLEANUP_EVERY_MS));
+}
+
+// On shutdown (deploys, dev reloads): stop this server's runs, cancel their
+// Replicate jobs so they don't keep billing, and put them straight back in the
+// queue without using up an attempt, so the next server picks them up at once.
+export async function stopWorker() {
+  stopping = true;
+  timers.forEach(clearInterval);
+  const ids = [...running.keys()];
+  for (const ctx of running.values()) {
+    ctx.shuttingDown = true;
+    ctx.canceled = true;
+    for (const id of ctx.predictions) await cancelPrediction(id);
+  }
+  if (ids.length > 0) {
+    await pool.query(
+      `UPDATE runs SET status = 'queued', attempts = GREATEST(attempts - 1, 0), heartbeat_at = NULL
+        WHERE id = ANY($1) AND status = 'running'`,
+      [ids],
+    );
+  }
 }
 
 // Clears the temporary parts of runs nobody has looked at for a week: the
@@ -183,11 +208,14 @@ async function claimAndRun() {
     await finish(run.id, 'failed', null, 'This run kept getting interrupted. Please try again.');
     return;
   }
-  if (run.attempts > 1) {
-    // Start over cleanly rather than half-resuming.
+  const { rows: started } = await pool.query('SELECT 1 FROM run_steps WHERE run_id = $1 LIMIT 1', [run.id]);
+  if (started.length > 0) {
+    // Start over cleanly rather than half-resuming, and give back what was
+    // charged so redoing the parts isn't charged twice.
     await pool.query('DELETE FROM run_steps WHERE run_id = $1', [run.id]);
     await pool.query('DELETE FROM run_media WHERE run_id = $1', [run.id]);
     if (run.kind === 'research') await clearKnowledge(run.id);
+    await refundRun(run.id);
     await step(run.id, 'think', 'Picking this back up after an interruption');
   }
 
@@ -196,7 +224,8 @@ async function claimAndRun() {
   }, HEARTBEAT_MS);
 
   // Watch for the user cancelling: stop new work and cancel Replicate jobs in flight.
-  const ctx: RunContext = { runId: run.id, canceled: false, predictions: new Set() };
+  const ctx = { runId: run.id, canceled: false, predictions: new Set<string>(), shuttingDown: false };
+  running.set(run.id, ctx);
   const watcher = setInterval(() => {
     pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [run.id])
       .then(({ rows }) => {
@@ -214,7 +243,9 @@ async function claimAndRun() {
       else await produce(run);
     });
   } catch (err) {
-    if (err instanceof CanceledError) {
+    if (ctx.shuttingDown) {
+      // Back in the queue already (see stopWorker); leave it be.
+    } else if (err instanceof CanceledError) {
       await pool.query('INSERT INTO run_steps (run_id, kind, title, detail) VALUES ($1, $2, $3, $4)', [
         run.id, 'error', 'Canceled', 'You’re only charged for the parts that finished.',
       ]);
@@ -227,6 +258,7 @@ async function claimAndRun() {
   } finally {
     clearInterval(heartbeat);
     clearInterval(watcher);
+    running.delete(run.id);
   }
 }
 

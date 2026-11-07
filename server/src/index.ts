@@ -4,7 +4,7 @@ import { authRouter } from './auth.ts';
 import { botsRouter } from './bots.ts';
 import { chatRouter } from './chat.ts';
 import { migrate } from './migrate.ts';
-import { startWorker } from './worker.ts';
+import { startWorker, stopWorker } from './worker.ts';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -22,6 +22,17 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 await migrate();
 startWorker();
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
+
+// Hand running jobs back to the queue before exiting (deploys, dev reloads).
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    console.log(`${signal}: returning running jobs to the queue…`);
+    server.close();
+    stopWorker()
+      .catch((err: unknown) => console.error('Worker shutdown failed:', err))
+      .finally(() => process.exit(0));
+  });
+}
