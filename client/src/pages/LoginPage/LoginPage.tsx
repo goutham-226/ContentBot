@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router';
 import './LoginPage.css';
 import BrandPanel from './BrandPanel';
 import FloatingInput from './FloatingInput';
@@ -15,6 +16,10 @@ async function login(identifier: string, password: string): Promise<LoginRespons
   });
   const data: unknown = await res.json().catch(() => null);
 
+  // No JSON body means the request never reached our API (e.g. Vite's 502 proxy error).
+  if (data === null) {
+    throw new Error('Can’t reach the server right now. Please try again in a moment.');
+  }
   if (!res.ok) {
     const message =
       data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
@@ -36,8 +41,17 @@ function GoogleIcon() {
   );
 }
 
+// Set by SignupPage when it redirects here after creating an account.
+function signedUpAs(state: unknown): string {
+  return state && typeof state === 'object' && 'signedUpAs' in state && typeof state.signedUpAs === 'string'
+    ? state.signedUpAs
+    : '';
+}
+
 export default function LoginPage() {
-  const [identifier, setIdentifier] = useState('');
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [identifier, setIdentifier] = useState(() => signedUpAs(location.state));
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -55,7 +69,7 @@ export default function LoginPage() {
 
     try {
       const res = await login(identifier.trim(), password);
-      alert(`Logged in as ${res.user}`);
+      navigate('/app', { state: { user: res.user } });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
     } finally {
@@ -123,7 +137,7 @@ export default function LoginPage() {
           </section>
 
           <section className="card signup-card">
-            Don't have an account? <a href="#">Sign up</a>
+            Don't have an account? <Link to="/signup">Sign up</Link>
           </section>
         </main>
 

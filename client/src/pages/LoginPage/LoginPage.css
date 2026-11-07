@@ -169,6 +169,21 @@
   font-size: 0.625rem;
 }
 
+.field--invalid,
+.field--invalid:focus-within {
+  border-color: var(--error);
+}
+
+.field--invalid:focus-within {
+  box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.2);
+}
+
+.field-error {
+  margin: 4px 4px 2px;
+  color: var(--error);
+  font-size: 0.75rem;
+}
+
 .field__slot {
   display: flex;
   align-items: center;
