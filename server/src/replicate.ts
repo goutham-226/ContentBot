@@ -6,8 +6,7 @@ const POLL_MS = 2000;
 const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 export const MODELS = {
-  // Replicate has no 270B Qwen; 235B is the largest Qwen text model there.
-  llm: process.env.REPLICATE_LLM_MODEL ?? 'qwen/qwen3-235b-a22b-instruct-2507',
+  llm: process.env.REPLICATE_LLM_MODEL ?? 'google/gemini-2.5-flash',
   image: process.env.REPLICATE_IMAGE_MODEL ?? 'bytedance/seedream-5-lite',
   video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-highspeed',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
@@ -140,8 +139,18 @@ export async function download(url: string): Promise<{ data: Buffer; contentType
   return { data, contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
 }
 
+// Gemini names its length limit differently and can "think" first; thinking is
+// off because these prompts are structured extraction and writing, and it
+// keeps runs fast and cheap. Other models (e.g. Qwen) take max_tokens.
+function textInput(model: string, prompt: string, maxTokens: number): Record<string, unknown> {
+  if (model.startsWith('google/gemini')) {
+    return { prompt, max_output_tokens: maxTokens, temperature: 0.7, thinking_budget: 0 };
+  }
+  return { prompt, max_tokens: maxTokens, temperature: 0.7 };
+}
+
 export async function generateText(prompt: string, maxTokens = 2048): Promise<string> {
-  const output = await predict(MODELS.llm, { prompt, max_tokens: maxTokens, temperature: 0.7 }, 5 * 60_000);
+  const output = await predict(MODELS.llm, textInput(MODELS.llm, prompt, maxTokens), 5 * 60_000);
   return Array.isArray(output) ? output.join('') : String(output ?? '');
 }
 
