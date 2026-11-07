@@ -67,15 +67,38 @@ function createSlot(): Promise<void> {
   return createQueue;
 }
 
+// Official models run by name; community models (like the embedding model)
+// need a version id, looked up once and cached.
+const versions = new Map<string, string>();
+
+async function latestVersion(model: string): Promise<string> {
+  const cached = versions.get(model);
+  if (cached) return cached;
+  const info = await api<{ latest_version?: { id?: string } | null }>(`${API_BASE}/models/${model}`);
+  const id = info.latest_version?.id;
+  if (!id) throw new ReplicateError(`${model} has no published version.`);
+  versions.set(model, id);
+  return id;
+}
+
+async function startPrediction(model: string, input: Record<string, unknown>): Promise<Prediction> {
+  const init = { method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'wait=60' } };
+  if (!versions.has(model)) {
+    try {
+      return await api<Prediction>(`${API_BASE}/models/${model}/predictions`, { ...init, body: JSON.stringify({ input }) });
+    } catch (err) {
+      if (!(err instanceof ReplicateError && err.message.startsWith('Replicate returned 404'))) throw err;
+    }
+  }
+  const version = await latestVersion(model);
+  return api<Prediction>(`${API_BASE}/predictions`, { ...init, body: JSON.stringify({ version, input }) });
+}
+
 async function createPrediction(model: string, input: Record<string, unknown>): Promise<Prediction> {
   for (let attempt = 0; ; attempt++) {
     await createSlot();
     try {
-      return await api<Prediction>(`${API_BASE}/models/${model}/predictions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Prefer: 'wait=60' },
-        body: JSON.stringify({ input }),
-      });
+      return await startPrediction(model, input);
     } catch (err) {
       const throttled = err instanceof ReplicateError && err.message.startsWith('Replicate returned 429');
       if (!throttled || attempt >= MAX_THROTTLE_RETRIES) throw err;
