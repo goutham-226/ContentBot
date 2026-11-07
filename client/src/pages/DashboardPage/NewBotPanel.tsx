@@ -7,6 +7,12 @@ import { CheckIcon, RobotIcon } from '../../components/icons';
 
 const MAX_NICHES = 3;
 
+// Must match the bubble-float animation duration in DashboardPage.css.
+// Each bubble starts a little later in the cycle than the one before, so a
+// gentle wave rolls across the cloud instead of everything bobbing in sync.
+const FLOAT_PERIOD_S = 5;
+const FLOAT_STAGGER_S = 0.35;
+
 export default function NewBotPanel() {
   const { addBot } = useBots();
   const navigate = useNavigate();
@@ -41,20 +47,26 @@ export default function NewBotPanel() {
 
       <form className="niche-form" onSubmit={handleSubmit}>
         <div className="bubbles" role="group" aria-label={`Niches, choose up to ${MAX_NICHES}`}>
-          {NICHES.map((niche) => {
+          {NICHES.map((niche, i) => {
             const isSelected = selected.includes(niche);
             return (
-              <button
+              // The wrapper floats; the button keeps its own press/pop animations.
+              <span
                 key={niche}
-                type="button"
-                className="bubble"
-                aria-pressed={isSelected}
-                disabled={atLimit && !isSelected}
-                onClick={() => toggle(niche)}
+                className="bubble-float"
+                style={{ animationDelay: `${-(i * FLOAT_STAGGER_S) % FLOAT_PERIOD_S}s` }}
               >
-                {isSelected && <CheckIcon />}
-                {niche}
-              </button>
+                <button
+                  type="button"
+                  className="bubble"
+                  aria-pressed={isSelected}
+                  disabled={atLimit && !isSelected}
+                  onClick={() => toggle(niche)}
+                >
+                  {isSelected && <CheckIcon />}
+                  {niche}
+                </button>
+              </span>
             );
           })}
         </div>

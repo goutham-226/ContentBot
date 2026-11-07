@@ -336,9 +336,27 @@
   100% { transform: scale(1); }
 }
 
+/* Floating on water: a slow, small bob (3px) so text stays easy to read. */
+.bubble-float {
+  display: inline-flex;
+  animation: bubble-float 5s ease-in-out infinite;
+}
+
+@keyframes bubble-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+/* Hold still while the user is aiming or tabbing through the bubbles. */
+.bubbles:hover .bubble-float,
+.bubbles:focus-within .bubble-float {
+  animation-play-state: paused;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .bubble,
-  .bubble[aria-pressed='true'] {
+  .bubble[aria-pressed='true'],
+  .bubble-float {
     animation: none;
     transition: none;
   }
