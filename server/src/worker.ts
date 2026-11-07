@@ -54,6 +54,17 @@ const VIRAL_RULES = `What makes a short go viral:
 - High stakes or strong emotion: awe, outrage, fear, disbelief, laughter.
 - Counterintuitive truths, debunked myths, "what happens if…", untold stories, secret histories.
 - Relatable to a broad audience, but told as something most people don't know.`;
+
+// Videos where the character just stands and talks don't hold attention, so
+// every scene has to show its point on screen.
+const SHOW_DONT_TELL = `Show, don't tell. The character never just stands and talks to the camera:
+- Every scene is somewhere specific and the character is DOING something there: walking through it, pointing at it, touching it, reacting to it, getting caught up in it.
+- Every claim gets a concrete, visual example on screen: the actual object, place, event, experiment or person-type, not a description of it.
+- Stories (fairy tales, horror, history, true crime, myths): the character does a ground report from inside the story: standing in the cursed village, at the crime scene, on the battlefield, with the events unfolding around them as a reporter would cover breaking news.
+- Science and tech: demonstrate it. Shrink into the bloodstream, cut the object open with an x-ray view, run the experiment, show the before and after, scale it up or slow it down.
+- Money, business, self-improvement, health: a real-life example acted out (the shopper at the till, the stack of cash growing, the body reacting), with the character in the middle of it.
+- Spoken lines react to what's on screen ("look at this", "now watch what happens") instead of explaining what the viewer could see for themselves.
+- No on-screen text, captions or labels (video models garble them); the visuals and the voice carry everything.`;
 const MAX_REFERENCE_BYTES = 5 * 1024 * 1024;
 
 type RunRow = {
@@ -699,6 +710,8 @@ ${passages.map((h, i) => `<passage id="${i + 1}" source="${h.source}">\n${h.cont
 
 ${VIRAL_RULES}
 
+${SHOW_DONT_TELL}
+
 Write a script built to go viral, in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds long, told in ${SCENES} scenes of ${SCENE_SECONDS} seconds that flow into each other.
 Make it punchy:
 - Scene 1 opens with the hook in the first 2 seconds: a bold claim, a shocking fact or a question. No intros, no "hey guys", no "in this video".
@@ -707,6 +720,7 @@ Make it punchy:
 - Each scene ends on a beat that pulls into the next (a twist, a "but", a cliffhanger).
 - End with a punchline or a mind-blown final fact that makes people rewatch or comment. No "like and subscribe".
 - Stick to facts from the research; never invent statistics.
+- Each scene is built around one concrete example from the research.
 - Keep each scene's spoken lines to at most ${WORDS_PER_SCENE} words in total so they fit ${SCENE_SECONDS} seconds.
 Reply with JSON only:
 {
@@ -717,8 +731,11 @@ Reply with JSON only:
   "scenes": [
     {
       "voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line"}, ...at most ${WORDS_PER_SCENE} words in total for this scene, no stage directions${characters.length === 2 ? ', a back-and-forth between both characters' : ''}],
-      "frame": "an image prompt for this scene's key frame, featuring you as described in Look",
-      "video": "a prompt for this ${SCENE_SECONDS}-second clip: action, camera movement, mood, who speaks; continuing smoothly from the previous scene"
+      "location": "the specific place this scene happens, in a few words (e.g. 'inside a human artery', 'a foggy cursed village at midnight')",
+      "example": "the concrete example on screen that proves this scene's point",
+      "action": "what the character physically does in the scene (never just standing and talking)",
+      "frame": "an image prompt for this scene's key frame: you mid-action in the location, with the example clearly visible, as described in Look",
+      "video": "a prompt for this ${SCENE_SECONDS}-second clip: what happens on screen beat by beat, the character's movement and reactions, the camera movement and the mood; continuing smoothly from the previous scene"
     },
     ...exactly ${SCENES} scenes, the first one opening with the hook
   ]
@@ -733,7 +750,21 @@ Reply with JSON only:
     .filter((l) => l.text);
   const scenes = (Array.isArray(written.scenes) ? written.scenes : [])
     .map((sc: unknown) => (sc && typeof sc === 'object' ? (sc as Record<string, unknown>) : {}))
-    .map((sc) => ({ lines: toLines(sc.voiceLines), frame: str(sc.frame), video: str(sc.video) }))
+    .map((sc) => {
+      // The where, what and doing go into both prompts so the models stage the
+      // scene rather than drawing a presenter.
+      const staging = [
+        str(sc.location) && `Location: ${str(sc.location)}.`,
+        str(sc.example) && `On screen: ${str(sc.example)}.`,
+        str(sc.action) && `The character: ${str(sc.action)}.`,
+      ].filter(Boolean).join(' ');
+      const withStaging = (prompt: string) => (prompt && staging ? `${prompt}\n${staging}` : prompt);
+      return {
+        lines: toLines(sc.voiceLines),
+        frame: withStaging(str(sc.frame)),
+        video: withStaging(str(sc.video)) && `${withStaging(str(sc.video))}\nThe character is moving and interacting with the scene, not standing still talking to the camera.`,
+      };
+    })
     .filter((sc) => sc.video || sc.frame)
     .slice(0, SCENES);
   if (scenes.length === 0) throw new Error(`${MODELS.llm} didn’t write any scenes.`);
