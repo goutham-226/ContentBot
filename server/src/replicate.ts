@@ -9,7 +9,8 @@ const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 export const MODELS = {
   llm: process.env.REPLICATE_LLM_MODEL ?? 'google/gemini-2.5-flash',
-  image: process.env.REPLICATE_IMAGE_MODEL ?? 'bytedance/seedream-5-lite',
+  // FLUX.2 [klein] 4B: ~$0.001 per megapixel, with up to 5 reference images.
+  image: process.env.REPLICATE_IMAGE_MODEL ?? 'black-forest-labs/flux-2-klein-4b',
   video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-highspeed',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
   // 768-dimension vectors; knowledge_chunks.embedding must match.
@@ -173,19 +174,45 @@ export async function generateText(prompt: string, maxTokens = 2048): Promise<st
   return Array.isArray(output) ? output.join('') : String(output ?? '');
 }
 
-// Returns the generated image's (temporary) URL.
-export async function generateImage(prompt: string, references: string[], aspectRatio = '9:16'): Promise<string> {
-  const output = await predict(
-    MODELS.image,
-    {
+// Each image model family names its inputs differently.
+function imageInput(model: string, prompt: string, references: string[], aspectRatio: string, megapixels: 1 | 2) {
+  if (model.includes('flux-2-klein')) {
+    return {
       prompt,
-      ...(references.length > 0 && { image_input: references }),
-      size: '2K',
+      ...(references.length > 0 && { images: references.slice(0, 5) }),
       aspect_ratio: aspectRatio,
-      sequential_image_generation: 'disabled',
-    },
-    5 * 60_000,
-  );
+      output_megapixels: String(megapixels),
+      output_format: 'jpg',
+    };
+  }
+  if (model.includes('flux-2')) {
+    return {
+      prompt,
+      ...(references.length > 0 && { input_images: references.slice(0, 8) }),
+      aspect_ratio: aspectRatio,
+      resolution: `${megapixels} MP`,
+      output_format: 'jpg',
+    };
+  }
+  // Seedream
+  return {
+    prompt,
+    ...(references.length > 0 && { image_input: references.slice(0, 14) }),
+    size: '2K',
+    aspect_ratio: aspectRatio,
+    sequential_image_generation: 'disabled',
+  };
+}
+
+// Returns the generated image's (temporary) URL. 1 MP is plenty for 768p video
+// references; banners and character sheets ask for 2 MP.
+export async function generateImage(
+  prompt: string,
+  references: string[],
+  aspectRatio = '9:16',
+  megapixels: 1 | 2 = 1,
+): Promise<string> {
+  const output = await predict(MODELS.image, imageInput(MODELS.image, prompt, references, aspectRatio, megapixels), 5 * 60_000);
   const url = Array.isArray(output) ? output[0] : output;
   if (typeof url !== 'string') throw new ReplicateError('The image model returned no image.');
   return url;

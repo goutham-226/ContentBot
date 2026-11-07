@@ -595,6 +595,7 @@ async function drawCharacter(run: RunRow) {
           original(`Character reference sheet on a plain light background: this original character shown from the front, side and back, plus four facial expressions (happy, surprised, thinking, laughing). Consistent design throughout.\n\n${look}${changes}`),
           portrait ? [portrait, ...references].slice(0, 3) : references,
           '16:9',
+          2,
         );
         await saveAsset(run.bot_id, 'character_sheet', c.index, `${c.name} — character sheet`, url);
         await step(run.id, 'image', `${c.name}’s character sheet saved`);
@@ -623,7 +624,12 @@ async function drawCharacter(run: RunRow) {
   const channelDone = Promise.all(channelJobs.map(async (job) => {
     await step(run.id, 'image', `Drawing the ${job.name}`);
     return attempt(run.id, `Couldn’t draw the ${job.name}`, async () => {
-      const url = await generateImage(original(`${job.prompt}\n\n${cast}\nStyle: ${style}${changes}`), references, job.ratio);
+      const url = await generateImage(
+        original(`${job.prompt}\n\n${cast}\nStyle: ${style}${changes}`),
+        references,
+        job.ratio,
+        job.asset === 'channel_banner' ? 2 : 1,
+      );
       await saveAsset(run.bot_id, job.asset, null, `${bot.name} — ${job.name}`, url);
       await step(run.id, 'image', `${job.name[0].toUpperCase()}${job.name.slice(1)} saved`);
       return url;
