@@ -11,6 +11,8 @@ import type { DraftImage } from './images';
 import { CheckIcon } from '../../components/icons';
 import BotAvatar from './BotAvatar';
 import { BOT_COLORS, DEFAULT_BOT_COLOR } from './botColors';
+import VoicePicker from './VoicePicker';
+import { DEFAULT_VOICES, DUO_PRESETS } from './voices';
 
 const MAX_NICHES = 3;
 const CUSTOM = 'custom';
@@ -61,6 +63,7 @@ export default function NewBotPanel() {
   const [imageError, setImageError] = useState('');
   const [botName, setBotName] = useState('');
   const [botColor, setBotColor] = useState(DEFAULT_BOT_COLOR);
+  const [voices, setVoices] = useState<[string, string]>(DEFAULT_VOICES);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
 
@@ -112,6 +115,7 @@ export default function NewBotPanel() {
   );
 
   const imagesRequired = identityId === CUSTOM;
+  const isDuo = identityId !== null && DUO_PRESETS.has(identityId);
   const imagesReady = !imagesRequired || images.length > 0;
 
   function addImages(files: File[]) {
@@ -173,6 +177,7 @@ export default function NewBotPanel() {
       const bot = await addBot({
         name,
         color: botColor,
+        voices: isDuo ? voices : [voices[0]],
         niches: selected,
         identity: identity.input,
         images: images.map((img) => img.file),
@@ -190,7 +195,7 @@ export default function NewBotPanel() {
       <div className="new-bot">
         <Stepper step={step} />
         <h1 ref={headingRef} tabIndex={-1}>Name your bot</h1>
-        <p className="new-bot-sub">Give it a name and pick its colour.</p>
+        <p className="new-bot-sub">Give it a name, a colour and a voice. The voice stays the same in every video.</p>
 
         <form className="niche-form" onSubmit={handleSubmit}>
           <div className="name-step">
@@ -227,6 +232,21 @@ export default function NewBotPanel() {
               </div>
             </fieldset>
           </div>
+
+          <VoicePicker
+            legend={isDuo ? 'First character’s voice' : 'Voice'}
+            name="voice-1"
+            value={voices[0]}
+            onChange={(v) => setVoices(([, second]) => [v, second])}
+          />
+          {isDuo && (
+            <VoicePicker
+              legend="Second character’s voice"
+              name="voice-2"
+              value={voices[1]}
+              onChange={(v) => setVoices(([first]) => [first, v])}
+            />
+          )}
 
           {saveError && <p className="images-error" role="alert">{saveError}</p>}
 

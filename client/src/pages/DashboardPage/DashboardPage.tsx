@@ -76,8 +76,8 @@ export default function DashboardPage() {
     setBots(await listBots());
   }
 
-  async function approveCharacter(botId: string, text: string, second: string) {
-    const updated = await saveCharacter(botId, text, second);
+  async function approveCharacter(botId: string, text: string, second: string, voices: string[]) {
+    const updated = await saveCharacter(botId, text, second, voices);
     setBots((prev) => prev.map((b) => (b.id === botId ? updated : b)));
   }
 

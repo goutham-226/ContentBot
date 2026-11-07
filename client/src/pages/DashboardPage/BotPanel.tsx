@@ -7,6 +7,8 @@ import { approveResearch, cancelRun, getThread, regenerateIdentity, reresearch, 
 import type { IdentityAsset } from '../../api';
 import RunCard from './RunCard';
 import BotAvatar from './BotAvatar';
+import VoicePicker from './VoicePicker';
+import { voiceLabel } from './voices';
 import { SendIcon, TrashIcon } from '../../components/icons';
 
 const MESSAGE_MAX = 4000;
@@ -180,11 +182,13 @@ function CharacterCard({ bot }: { bot: Bot }) {
   const [text, setText] = useState(bot.character.text);
   const [second, setSecond] = useState(bot.character.second);
   const [hasSecond, setHasSecond] = useState(bot.character.second.trim() !== '');
+  const [voices, setVoices] = useState<[string, string]>(bot.character.voices);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   const secondText = hasSecond ? second.trim() : '';
-  const changed = text.trim() !== bot.character.text.trim() || secondText !== bot.character.second.trim();
+  const changed = text.trim() !== bot.character.text.trim() || secondText !== bot.character.second.trim()
+    || voices[0] !== bot.character.voices[0] || voices[1] !== bot.character.voices[1];
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -192,7 +196,7 @@ function CharacterCard({ bot }: { bot: Bot }) {
     setSaving(true);
     setError('');
     try {
-      await approveCharacter(bot.id, text, secondText);
+      await approveCharacter(bot.id, text, secondText, voices);
       setEditing(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t save your characters.');
@@ -205,6 +209,7 @@ function CharacterCard({ bot }: { bot: Bot }) {
     setText(bot.character.text);
     setSecond(bot.character.second);
     setHasSecond(bot.character.second.trim() !== '');
+    setVoices(bot.character.voices);
     setEditing(false);
   }
 
@@ -216,7 +221,13 @@ function CharacterCard({ bot }: { bot: Bot }) {
           <button type="button" className="character-edit" onClick={() => setEditing(true)}>Edit</button>
         </h2>
         <p className="character-text">{bot.character.text}</p>
-        {bot.character.second && <p className="character-text character-text--second">{bot.character.second}</p>}
+        <p className="character-voice">Voice: {voiceLabel(bot.character.voices[0])}</p>
+        {bot.character.second && (
+          <>
+            <p className="character-text character-text--second">{bot.character.second}</p>
+            <p className="character-voice">Voice: {voiceLabel(bot.character.voices[1])}</p>
+          </>
+        )}
       </section>
     );
   }
@@ -239,6 +250,12 @@ function CharacterCard({ bot }: { bot: Bot }) {
         rows={6}
         aria-label="Character 1"
       />
+      <VoicePicker
+        legend={hasSecond ? 'Character 1’s voice' : 'Voice'}
+        name="character-voice-1"
+        value={voices[0]}
+        onChange={(v) => setVoices(([, b]) => [v, b])}
+      />
       {hasSecond ? (
         <>
           <div className="character-second-head">
@@ -253,6 +270,12 @@ function CharacterCard({ bot }: { bot: Bot }) {
             rows={6}
             placeholder={'Name: …\nLook: …\nPersonality: …\nVoice: …'}
             aria-label="Character 2"
+          />
+          <VoicePicker
+            legend="Character 2’s voice"
+            name="character-voice-2"
+            value={voices[1]}
+            onChange={(v) => setVoices(([a]) => [a, v])}
           />
         </>
       ) : (

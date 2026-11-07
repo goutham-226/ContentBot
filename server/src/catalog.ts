@@ -32,3 +32,18 @@ export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const BOT_COLORS = new Set(['blue', 'purple', 'pink', 'red', 'orange', 'yellow', 'green', 'teal']);
 export const BOT_NAME_MAX = 40;
 export const MESSAGE_MAX = 4000;
+
+// Qwen3-TTS preset speakers. Keep in sync with client/src/pages/DashboardPage/voices.ts
+// and the bots_voice_check constraint (db/migrations/010_voices.sql).
+export const VOICES = new Map([
+  ['Ryan', 'Dynamic male voice with strong rhythmic drive'],
+  ['Aiden', 'Sunny American male voice with a clear midrange'],
+  ['Serena', 'Warm, gentle young female voice'],
+  ['Vivian', 'Bright, slightly edgy young female voice'],
+  ['Sohee', 'Warm female voice with rich emotion'],
+  ['Ono_anna', 'Playful female voice with a light, nimble timbre'],
+  ['Uncle_fu', 'Seasoned male voice with a low, mellow timbre'],
+  ['Dylan', 'Youthful male voice with a clear, natural timbre'],
+  ['Eric', 'Lively male voice with a slightly husky brightness'],
+]);
+export const DEFAULT_VOICES = ['Ryan', 'Aiden'] as const;

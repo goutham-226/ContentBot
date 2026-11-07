@@ -1,5 +1,5 @@
-// Joins video clips end to end with ffmpeg (installed on the machine;
-// FFMPEG_PATH overrides where to find it).
+// Joins video clips end to end with ffmpeg and measures media with ffprobe
+// (installed on the machine; FFMPEG_PATH and FFPROBE_PATH override where).
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,22 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_PATH ?? 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH ?? 'ffprobe';
+
+// Length of an audio or video file in seconds.
+export async function mediaSeconds(data: Buffer): Promise<number> {
+  const dir = await mkdtemp(join(tmpdir(), 'twinfluencer-probe-'));
+  try {
+    const file = join(dir, 'media');
+    await writeFile(file, data);
+    const { stdout } = await run(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+    const seconds = Number.parseFloat(stdout);
+    if (!Number.isFinite(seconds)) throw new Error('Couldn’t measure the clip’s length.');
+    return seconds;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 export async function stitchClips(clips: Buffer[]): Promise<Buffer> {
   const dir = await mkdtemp(join(tmpdir(), 'twinfluencer-stitch-'));

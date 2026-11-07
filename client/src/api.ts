@@ -54,6 +54,7 @@ export async function listBots(): Promise<Bot[]> {
 export type NewBotInput = {
   name: string;
   color: string;
+  voices: string[]; // one per character
   niches: string[];
   identity: IdentityInput;
   images: File[];
@@ -71,11 +72,11 @@ export function deleteBot(botId: string): Promise<void> {
   return request<void>(`/api/bots/${botId}`, { method: 'DELETE' });
 }
 
-export async function saveCharacter(botId: string, text: string, second: string): Promise<Bot> {
+export async function saveCharacter(botId: string, text: string, second: string, voices: string[]): Promise<Bot> {
   const { bot } = await request<{ bot: Bot }>(`/api/bots/${botId}/character`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, second }),
+    body: JSON.stringify({ text, second, voices }),
   });
   return bot;
 }

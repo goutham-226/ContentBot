@@ -22,6 +22,7 @@ export type BotCharacter = {
   text: string;
   second: string; // optional second character; '' when there's one
   approved: boolean; // chat opens once the user approves (or edits) the draft
+  voices: [string, string]; // each character's preset voice
 };
 
 export type Bot = {
@@ -91,7 +92,7 @@ export type BotsContext = {
   loading: boolean;
   addBot: (input: NewBotInput) => Promise<Bot>;
   removeBot: (botId: string) => Promise<void>;
-  approveCharacter: (botId: string, text: string, second: string) => Promise<void>;
+  approveCharacter: (botId: string, text: string, second: string, voices: string[]) => Promise<void>;
   refreshBots: () => Promise<void>;
   refreshBalance: () => Promise<void>;
 };

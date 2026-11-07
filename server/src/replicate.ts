@@ -219,18 +219,31 @@ export async function generateImage(
 }
 
 // Returns the voiceover's (temporary) URL. Qwen3-TTS is the best value on
-// Replicate (~$0.02 per 1,000 characters), and voice design lets each
-// character get a voice that matches its description.
-export async function generateSpeech(text: string, voiceDescription: string): Promise<string> {
+// Replicate (~$0.02 per 1,000 characters). A preset speaker keeps the voice
+// identical across scenes and videos; the style instruction only changes the
+// delivery (pace, energy, emotion), not who is speaking.
+export async function generateSpeech(text: string, speaker: string, styleInstruction = ''): Promise<string> {
   const output = await predict(
     MODELS.voice,
-    { text, mode: 'voice_design', voice_description: voiceDescription, language: 'auto' },
+    {
+      text,
+      mode: 'custom_voice',
+      speaker,
+      language: 'auto',
+      ...(styleInstruction && { style_instruction: styleInstruction }),
+    },
     5 * 60_000,
   );
   const url = Array.isArray(output) ? output[0] : output;
   if (typeof url !== 'string') throw new ReplicateError('The voice model returned no audio.');
   return url;
 }
+
+// MiniMax H3's reference rules: up to 9 images; up to 3 videos and 3 audio
+// clips, each 2–15 s and at most 15 s of each in total; audio only alongside
+// an image or video. URLs must be publicly fetchable, so only Replicate output
+// links work (uploads to the Files API need auth). Callers check durations.
+export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2, maxTotalSeconds: 15 };
 
 // Returns the generated video's (temporary) URL. References must be public
 // URLs, so pass Replicate output links straight from the same run. Reference
@@ -247,10 +260,9 @@ export async function generateVideo(
       prompt,
       duration,
       ratio: '9:16',
-      ...(references.images.length > 0 && { reference_image_urls: references.images.slice(0, 9) }),
-      ...(references.videos.length > 0 && { reference_video_urls: references.videos.slice(0, 1) }),
-      // MiniMax needs a reference image or video alongside any reference audio.
-      ...(visual && references.audio.length > 0 && { reference_audio_urls: references.audio.slice(0, 3) }),
+      ...(references.images.length > 0 && { reference_image_urls: references.images.slice(0, VIDEO_LIMITS.images) }),
+      ...(references.videos.length > 0 && { reference_video_urls: references.videos.slice(0, VIDEO_LIMITS.videos) }),
+      ...(visual && references.audio.length > 0 && { reference_audio_urls: references.audio.slice(0, VIDEO_LIMITS.audio) }),
     },
     20 * 60_000,
   );

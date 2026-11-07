@@ -4,8 +4,8 @@ import multer from 'multer';
 import { pool } from './db.ts';
 import { currentUser, requireAuth } from './session.ts';
 import {
-  BOT_COLORS, BOT_NAME_MAX, CUSTOM_DESCRIPTION_MAX, CUSTOM_NAME_MAX, IDENTITY_PRESETS, MAX_IMAGE_BYTES, MAX_IMAGES,
-  MAX_NICHES, NICHES,
+  BOT_COLORS, BOT_NAME_MAX, CUSTOM_DESCRIPTION_MAX, CUSTOM_NAME_MAX, DEFAULT_VOICES, IDENTITY_PRESETS, MAX_IMAGE_BYTES,
+  MAX_IMAGES, MAX_NICHES, NICHES, VOICES,
 } from './catalog.ts';
 import { draftCharacters, imageQueryFor } from './character.ts';
 import { findReferenceImages } from './referenceImages.ts';
@@ -34,6 +34,8 @@ type BotRow = {
   character: string;
   character2: string;
   character_approved: boolean;
+  voice: string;
+  voice2: string;
   created_at: Date;
   images: {
     id: string;
@@ -82,7 +84,7 @@ function toDto(row: BotRow) {
             identityName: row.identity_name,
             identityDescription: row.identity_description,
           });
-      return { text: draft, second: draft2, approved: row.character_approved };
+      return { text: draft, second: draft2, approved: row.character_approved, voices: [row.voice, row.voice2] };
     })(),
     createdAt: row.created_at.toISOString(),
   };
@@ -100,8 +102,16 @@ function sniffImageType(buf: Buffer): string | null {
   return null;
 }
 
+// [first character's voice, second character's voice]; missing ones get defaults.
+function parseVoices(raw: unknown): [string, string] | string {
+  if (raw === undefined) return [...DEFAULT_VOICES];
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 2) return 'Pick a voice for your character.';
+  if (!raw.every((v): v is string => typeof v === 'string' && VOICES.has(v))) return 'Unknown voice.';
+  return [raw[0], raw[1] ?? DEFAULT_VOICES[1]];
+}
+
 // Parses the "data" form field. Returns an error message or the clean values.
-type BotInput = { name: string; color: string; niches: string[]; identity: Identity };
+type BotInput = { name: string; color: string; voices: [string, string]; niches: string[]; identity: Identity };
 
 function parseBotInput(raw: unknown): BotInput | string {
   let data: unknown;
@@ -117,6 +127,8 @@ function parseBotInput(raw: unknown): BotInput | string {
   if (name.length > BOT_NAME_MAX) return `Bot names can be at most ${BOT_NAME_MAX} characters.`;
   const color = 'color' in data && typeof data.color === 'string' ? data.color : '';
   if (!BOT_COLORS.has(color)) return 'Pick a colour for your bot.';
+  const voices = parseVoices('voices' in data ? data.voices : undefined);
+  if (typeof voices === 'string') return voices;
 
   const niches = 'niches' in data && Array.isArray(data.niches) ? data.niches : [];
   if (niches.length < 1 || niches.length > MAX_NICHES) return `Pick between 1 and ${MAX_NICHES} niches.`;
@@ -129,7 +141,7 @@ function parseBotInput(raw: unknown): BotInput | string {
   if ('presetId' in identityRaw && typeof identityRaw.presetId === 'string') {
     const preset = IDENTITY_PRESETS.get(identityRaw.presetId);
     if (!preset) return 'Unknown channel identity.';
-    return { name, color, niches, identity: { presetId: identityRaw.presetId, ...preset } };
+    return { name, color, voices, niches, identity: { presetId: identityRaw.presetId, ...preset } };
   }
 
   const styleName =
@@ -141,12 +153,12 @@ function parseBotInput(raw: unknown): BotInput | string {
   if (description.length > CUSTOM_DESCRIPTION_MAX) {
     return `Descriptions can be at most ${CUSTOM_DESCRIPTION_MAX} characters.`;
   }
-  return { name, color, niches, identity: { presetId: null, name: styleName, description } };
+  return { name, color, voices, niches, identity: { presetId: null, name: styleName, description } };
 }
 
 const SELECT_BOTS = `
   SELECT b.id, b.name, b.color, b.niches, b.identity_preset, b.identity_name, b.identity_description,
-         b.character, b.character2, b.character_approved, b.created_at,
+         b.character, b.character2, b.character_approved, b.voice, b.voice2, b.created_at,
          COALESCE(
            json_agg(json_build_object(
              'id', i.id, 'name', i.filename, 'source_url', i.source_url, 'creator', i.creator, 'license', i.license,
@@ -226,12 +238,14 @@ botsRouter.post('/', upload.array('images', MAX_IMAGES), async (req, res) => {
     await client.query('BEGIN');
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO bots
-         (user_id, name, color, niches, identity_preset, identity_name, identity_description, character, character2)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+         (user_id, name, color, voice, voice2, niches, identity_preset, identity_name, identity_description, character, character2)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
       [
         userId,
         parsed.name,
         parsed.color,
+        parsed.voices[0],
+        parsed.voices[1],
         parsed.niches,
         parsed.identity.presetId,
         parsed.identity.name,
@@ -302,8 +316,8 @@ botsRouter.delete('/:botId', async (req, res) => {
   res.status(rowCount ? 204 : 404).end();
 });
 
-// PUT /api/bots/:botId/character: { text, second? } — saves the (possibly edited)
-// characters (up to two) and approves them.
+// PUT /api/bots/:botId/character: { text, second?, voices? } — saves the
+// (possibly edited) characters (up to two) and their voices, and approves them.
 botsRouter.put('/:botId/character', async (req, res) => {
   const { botId } = req.params;
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
@@ -316,11 +330,18 @@ botsRouter.put('/:botId/character', async (req, res) => {
     res.status(400).json({ error: `Characters can be at most ${CHARACTER_MAX} characters long.` });
     return;
   }
+  const voices = req.body?.voices === undefined ? null : parseVoices(req.body.voices);
+  if (typeof voices === 'string') {
+    res.status(400).json({ error: voices });
+    return;
+  }
   const userId = currentUser(res).id;
   const { rowCount } = UUID_RE.test(botId)
     ? await pool.query(
-        'UPDATE bots SET character = $1, character2 = $2, character_approved = true WHERE id = $3 AND user_id = $4',
-        [text, second, botId, userId],
+        `UPDATE bots SET character = $1, character2 = $2, character_approved = true,
+                voice = COALESCE($5, voice), voice2 = COALESCE($6, voice2)
+          WHERE id = $3 AND user_id = $4`,
+        [text, second, botId, userId, voices?.[0] ?? null, voices?.[1] ?? null],
       )
     : { rowCount: 0 };
   if (!rowCount) {
