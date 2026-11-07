@@ -187,21 +187,24 @@ export async function generateSpeech(text: string, voiceDescription: string): Pr
 }
 
 // Returns the generated video's (temporary) URL. References must be public
-// URLs, so pass Replicate output links straight from the same run.
+// URLs, so pass Replicate output links straight from the same run. Reference
+// video seconds are billed like output seconds.
 export async function generateVideo(
   prompt: string,
-  references: { images: string[]; audio: string[] },
+  references: { images: string[]; audio: string[]; videos: string[] },
   duration: number,
 ): Promise<string> {
+  const visual = references.images.length > 0 || references.videos.length > 0;
   const output = await predict(
     MODELS.video,
     {
       prompt,
       duration,
       ratio: '9:16',
-      ...(references.images.length > 0 && { reference_image_urls: references.images }),
-      // MiniMax needs a reference image alongside any reference audio.
-      ...(references.images.length > 0 && references.audio.length > 0 && { reference_audio_urls: references.audio }),
+      ...(references.images.length > 0 && { reference_image_urls: references.images.slice(0, 9) }),
+      ...(references.videos.length > 0 && { reference_video_urls: references.videos.slice(0, 1) }),
+      // MiniMax needs a reference image or video alongside any reference audio.
+      ...(visual && references.audio.length > 0 && { reference_audio_urls: references.audio.slice(0, 3) }),
     },
     20 * 60_000,
   );

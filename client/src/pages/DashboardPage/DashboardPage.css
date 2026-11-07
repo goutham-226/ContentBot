@@ -1360,6 +1360,29 @@
   background: #000;
 }
 
+.run-video-fig {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+
+.run-video-fig figcaption {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.run-video-fig a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.run-audio + .run-audio,
+.findings-sources .run-audio {
+  margin-top: 8px;
+}
+
 .run-frames {
   list-style: none;
   display: flex;

@@ -215,10 +215,15 @@ export default function RunCard({ run, latest, onApprove, onReresearch }: {
       {run.result && run.kind === 'production' && 'script' in run.result && <ProductionView production={run.result} />}
 
       {videos.map((v) => (
-        <video key={v.id} className="run-video" src={v.url} controls playsInline preload="metadata" />
+        <figure key={v.id} className="run-video-fig">
+          <video className="run-video" src={v.url} controls playsInline preload="metadata" />
+          <figcaption>
+            {v.label} · <a href={v.url} download>Download</a>
+          </figcaption>
+        </figure>
       ))}
       {images.length > 0 && (
-        <ul className="run-frames" aria-label="Storyboard">
+        <ul className="run-frames" aria-label="Storyboard frames">
           {images.map((m) => (
             <li key={m.id}>
               <img src={m.url} alt={m.label} />
@@ -227,12 +232,17 @@ export default function RunCard({ run, latest, onApprove, onReresearch }: {
           ))}
         </ul>
       )}
-      {audio.map((a) => (
-        <div key={a.id} className="run-audio">
-          <span>{a.label}</span>
-          <audio src={a.url} controls preload="none" />
-        </div>
-      ))}
+      {audio.length > 0 && (
+        <details className="findings-sources">
+          <summary>{audio.length} voice clip{audio.length === 1 ? '' : 's'}</summary>
+          {audio.map((a) => (
+            <div key={a.id} className="run-audio">
+              <span>{a.label}</span>
+              <audio src={a.url} controls preload="none" />
+            </div>
+          ))}
+        </details>
+      )}
 
       {run.status === 'failed' && run.error && <p className="chat-error" role="alert">{run.error}</p>}
       {run.status === 'awaiting_approval' && latest && !run.archived && (
