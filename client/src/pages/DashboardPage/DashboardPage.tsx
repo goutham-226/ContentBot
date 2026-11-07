@@ -2,12 +2,19 @@ import { useState } from 'react';
 import type { MouseEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router';
 import './DashboardPage.css';
+import { joinNiches } from './bots';
 import type { Bot, BotsContext } from './bots';
 import {
   HelpIcon, InfoIcon, LogoutIcon, MenuIcon, RobotIcon, SidebarIcon, TagIcon,
 } from '../../components/icons';
 
 const MOBILE_QUERY = '(max-width: 768px)';
+
+const INFO_LINKS = [
+  { to: '/app/about', label: 'About', Icon: InfoIcon },
+  { to: '/app/pricing', label: 'Pricing', Icon: TagIcon },
+  { to: '/app/help', label: 'Help', Icon: HelpIcon },
+];
 
 // Set by LoginPage when it redirects here.
 function loggedInAs(state: unknown): string {
@@ -27,12 +34,11 @@ export default function DashboardPage() {
 
   const onNewBotScreen = location.pathname.replace(/\/$/, '') === '/app';
 
-  function addBot(niche: string): Bot {
-    const clean = niche.trim();
+  function addBot(niches: string[]): Bot {
     const bot: Bot = {
       id: crypto.randomUUID(),
-      name: `${clean.charAt(0).toUpperCase()}${clean.slice(1)} Bot`,
-      niche: clean,
+      name: `${joinNiches(niches)} Bot`,
+      niches,
       createdAt: Date.now(),
     };
     setBots((prev) => [bot, ...prev]);
@@ -111,19 +117,20 @@ export default function DashboardPage() {
           )}
         </section>
 
+        {/* These open inside the app, so the dock stays put. */}
         <nav className="dock-links" aria-label="Info">
-          <Link to="/about" className="dock-item" title={collapsed ? 'About' : undefined}>
-            <InfoIcon />
-            <span className="dock-label">About</span>
-          </Link>
-          <Link to="/pricing" className="dock-item" title={collapsed ? 'Pricing' : undefined}>
-            <TagIcon />
-            <span className="dock-label">Pricing</span>
-          </Link>
-          <Link to="/help" className="dock-item" title={collapsed ? 'Help' : undefined}>
-            <HelpIcon />
-            <span className="dock-label">Help</span>
-          </Link>
+          {INFO_LINKS.map(({ to, label, Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) => `dock-item ${isActive ? 'is-active' : ''}`}
+              onClick={closeDrawer}
+              title={collapsed ? label : undefined}
+            >
+              <Icon />
+              <span className="dock-label">{label}</span>
+            </NavLink>
+          ))}
         </nav>
 
         <div className="dock-profile">
@@ -132,7 +139,6 @@ export default function DashboardPage() {
           </span>
           <span className="dock-label dock-user">
             <span className="dock-user-name">{user || 'Guest'}</span>
-            <span className="dock-user-plan">Free plan</span>
           </span>
           <Link to="/" className="dock-icon-btn dock-logout" aria-label="Log out" title="Log out">
             <LogoutIcon />

@@ -161,7 +161,6 @@
 .ill .f-skin { fill: var(--skin); }
 .ill .f-hair { fill: var(--hair); }
 .ill .f-face { fill: var(--face); }
-.ill .f-spine { fill: rgba(0, 0, 0, 0.25); }
 .ill .f-shadow { fill: rgba(0, 0, 0, 0.45); }
 
 .ill .float {
@@ -185,7 +184,7 @@
   padding: 1rem 0 3rem;
 }
 
-.public .about-cta-btn {
+.about-content .about-cta-btn {
   display: inline-flex;
   align-items: center;
   height: 44px;
@@ -197,6 +196,6 @@
   font-weight: 600;
 }
 
-.public .about-cta-btn:hover {
+.about-content .about-cta-btn:hover {
   filter: brightness(0.92);
 }

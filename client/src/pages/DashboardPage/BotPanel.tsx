@@ -1,5 +1,5 @@
 import { Link, useParams } from 'react-router';
-import { useBots } from './bots';
+import { joinNiches, useBots } from './bots';
 import { RobotIcon } from '../../components/icons';
 
 export default function BotPanel() {
@@ -19,7 +19,7 @@ export default function BotPanel() {
 
   // TODO: replace with real progress once bots are processed on the server.
   const stages = [
-    { title: 'Read best sellers', body: `Study the best-selling books in ${bot.niche}.` },
+    { title: 'Read top articles', body: `Study the top-rated articles in ${joinNiches(bot.niches)}.` },
     { title: 'Style ideas', body: 'Turn what readers loved into human-thought style ideas.' },
     { title: 'Channel identity', body: 'Use the suggested style or define your own identity and characters.' },
   ];
@@ -32,7 +32,11 @@ export default function BotPanel() {
         </span>
         <div>
           <h1>{bot.name}</h1>
-          <span className="bot-niche">{bot.niche}</span>
+          <ul className="bot-niches" aria-label="Niches">
+            {bot.niches.map((niche) => (
+              <li key={niche} className="bot-niche">{niche}</li>
+            ))}
+          </ul>
         </div>
       </header>
 

@@ -158,26 +158,24 @@ export function NicheArt() {
 }
 
 export function ReadArt() {
-  const books = [
-    { x: 30, y: 150, w: 100, h: 22, c: 'f-accent' },
-    { x: 38, y: 128, w: 88, h: 22, c: 'f-strong' },
-    { x: 34, y: 106, w: 94, h: 22, c: 'f-muted' },
-    { x: 42, y: 86, w: 80, h: 20, c: 'f-ink' },
-  ];
   return (
-    <svg className="ill" viewBox="0 0 320 200" role="img" aria-label="The bot scanning a stack of best-selling books">
+    <svg className="ill" viewBox="0 0 320 200" role="img" aria-label="The bot scanning a stack of top-rated articles">
       <ellipse className="f-blob" cx="160" cy="110" rx="150" ry="88" />
       <Spark x={290} y={30} s={6} className="f-accent" />
 
-      <polygon className="f-beam" points="240,92 130,76 130,174" />
-      {books.map((b) => (
-        <g key={b.y}>
-          <rect className={b.c} x={b.x} y={b.y} width={b.w} height={b.h} rx="4" />
-          <rect className="f-spine" x={b.x + 10} y={b.y + 4} width="4" height={b.h - 8} rx="2" />
-        </g>
-      ))}
-      <circle className="f-accent" cx="116" cy="84" r="13" />
-      <Spark x={116} y={84} s={7} />
+      <polygon className="f-beam" points="240,92 128,76 128,174" />
+      {/* Stack of articles, front one showing a header image, title and text lines */}
+      <rect className="f-strong" x="40" y="74" width="84" height="100" rx="8" transform="rotate(-9 82 124)" />
+      <rect className="f-muted" x="40" y="74" width="84" height="100" rx="8" transform="rotate(-4 82 124)" />
+      <rect className="s-strong w2 f-panel" x="40" y="74" width="84" height="100" rx="8" />
+      <rect className="f-soft" x="48" y="82" width="68" height="24" rx="4" />
+      <rect className="f-ink" x="48" y="114" width="56" height="6" rx="3" />
+      <rect className="f-muted" x="48" y="127" width="68" height="4" rx="2" />
+      <rect className="f-muted" x="48" y="136" width="62" height="4" rx="2" />
+      <rect className="f-muted" x="48" y="145" width="66" height="4" rx="2" />
+      <rect className="f-muted" x="48" y="154" width="40" height="4" rx="2" />
+      <circle className="f-accent" cx="122" cy="76" r="13" />
+      <Spark x={122} y={76} s={7} />
 
       <rect className="f-ink" x="150" y="104" width="12" height="15" rx="2" transform="rotate(-12 156 111)" />
       <rect className="f-muted" x="176" y="122" width="10" height="13" rx="2" transform="rotate(10 181 128)" />

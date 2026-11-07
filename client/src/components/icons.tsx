@@ -84,14 +84,6 @@ export function LogoutIcon() {
   );
 }
 
-export function ArrowUpIcon() {
-  return (
-    <Icon>
-      <path d="M12 19V5M6 11l6-6 6 6" />
-    </Icon>
-  );
-}
-
 export function CheckIcon() {
   return (
     <Icon>

@@ -74,10 +74,10 @@
   color: var(--muted);
 }
 
-.public .help-more a {
+.help-content .help-more a {
   color: var(--accent);
 }
 
-.public .help-more a:hover {
+.help-content .help-more a:hover {
   text-decoration: underline;
 }

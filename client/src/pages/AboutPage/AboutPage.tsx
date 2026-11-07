@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 import './AboutPage.css';
 import PublicLayout from '../../components/PublicLayout';
+import { useInApp } from '../../components/useInApp';
 import { HeroArt, IdeasArt, IdentityArt, NicheArt, ReadArt } from './Illustrations';
 
 const steps = [
@@ -10,8 +11,8 @@ const steps = [
     Art: NicheArt,
   },
   {
-    title: 'It reads the best sellers',
-    body: 'Your bot studies the best-selling books in that niche to learn what resonates with real readers.',
+    title: 'It reads the top articles',
+    body: 'Your bot studies the top-rated articles in that niche to learn what resonates with real readers.',
     Art: ReadArt,
   },
   {
@@ -21,19 +22,21 @@ const steps = [
   },
 ];
 
-export default function AboutPage() {
+export function AboutContent() {
+  const inApp = useInApp();
+
   return (
-    <PublicLayout>
+    <div className="about-content">
       <section className="about-hero">
         <div className="about-hero-art">
           <HeroArt />
         </div>
         <h1>
-          Bots that create like <span className="accent">your niche’s best authors</span>
+          Bots that create like <span className="accent">your niche’s best writers</span>
         </h1>
         <p className="about-lead">
           Twinfluencer is a platform for creating content bots built around a niche. Each bot
-          learns from the best-selling books in its field, so the ideas it gives you are grounded
+          learns from the top-rated articles in its field, so the ideas it gives you are grounded
           in human thinking.
         </p>
       </section>
@@ -68,8 +71,18 @@ export default function AboutPage() {
 
       <section className="about-cta">
         <h2>Ready to build your first bot?</h2>
-        <Link to="/signup" className="about-cta-btn">Get started</Link>
+        <Link to={inApp ? '/app' : '/signup'} className="about-cta-btn">
+          {inApp ? 'Create a bot' : 'Get started'}
+        </Link>
       </section>
+    </div>
+  );
+}
+
+export default function AboutPage() {
+  return (
+    <PublicLayout>
+      <AboutContent />
     </PublicLayout>
   );
 }
