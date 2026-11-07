@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <title>Twinfluencer</title>
+  <defs>
+    <linearGradient id="tw-accent" x1="40" y1="30" x2="104" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7ea2ff"/>
+      <stop offset="1" stop-color="#4a7cf7"/>
+    </linearGradient>
+    <clipPath id="tw-left">
+      <circle cx="46" cy="64" r="28"/>
+    </clipPath>
+  </defs>
+
+  <!-- Overlap of the twins -->
+  <circle cx="74" cy="64" r="28" fill="url(#tw-accent)" fill-opacity="0.35" clip-path="url(#tw-left)"/>
+
+  <!-- The twins -->
+  <circle cx="46" cy="64" r="28" stroke="#f5f5f5" stroke-width="6"/>
+  <circle cx="74" cy="64" r="28" stroke="url(#tw-accent)" stroke-width="6"/>
+
+  <!-- Influence spark -->
+  <path d="M100 10 L103.5 20.5 L114 24 L103.5 27.5 L100 38 L96.5 27.5 L86 24 L96.5 20.5 Z" fill="#f5f5f5"/>
+</svg>
