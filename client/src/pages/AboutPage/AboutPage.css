@@ -1,62 +1,4 @@
-/* Theme tokens live in index.css */
-.about-page {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  background: var(--side-bg);
-  color: var(--text);
-}
-
-.about-page a {
-  color: inherit;
-  text-decoration: none;
-}
-
-/* ---------- Header ---------- */
-.about-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem clamp(1rem, 4vw, 2.5rem);
-  background: var(--brand-bg);
-  border-bottom: 1px solid #1c1c1c;
-}
-
-.about-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-family: 'Grand Hotel', cursive;
-  font-size: 1.75rem;
-  line-height: 1;
-}
-
-.about-brand-logo {
-  width: 32px;
-  height: 32px;
-}
-
-.about-page .about-login {
-  padding: 8px 18px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  font-size: 0.875rem;
-  font-weight: 600;
-  transition: background 0.15s;
-}
-
-.about-page .about-login:hover {
-  background: #2a2a2a;
-}
-
-/* ---------- Main ---------- */
-.about-main {
-  flex: 1;
-  width: 100%;
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 0 1rem;
-}
+/* Page shell, header and footer come from components/PublicLayout. */
 
 .about-hero {
   display: flex;
@@ -66,10 +8,10 @@
   padding: clamp(3rem, 8vw, 5rem) 0 3rem;
 }
 
-.about-hero-logo {
-  width: 96px;
-  height: 96px;
-  margin-bottom: 1.5rem;
+.about-hero-art {
+  width: 100%;
+  max-width: 480px;
+  margin-bottom: 2rem;
 }
 
 .about-hero h1 {
@@ -142,13 +84,99 @@
   font-size: 0.875rem;
 }
 
+.about-step-art {
+  margin-bottom: 1rem;
+}
+
 .about-identity {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  align-items: center;
+  gap: 2rem;
   padding: clamp(1.5rem, 4vw, 2.5rem);
   border-color: rgba(74, 124, 247, 0.35);
 }
 
+@media (max-width: 720px) {
+  .about-identity {
+    grid-template-columns: 1fr;
+  }
+}
+
 .about-identity h2 {
   margin-bottom: 0.75rem;
+}
+
+/* ---------- Illustrations ----------
+   s-* = stroke, f-* = fill. Fill rules come after stroke rules so a shape
+   with both (e.g. "s-accent f-panel") keeps its fill. */
+.ill {
+  --skin: #e3c7ac;
+  --hair: #2b2b2b;
+  --face: #1a1a1a;
+
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.ill .s-accent,
+.ill .s-ink,
+.ill .s-strong,
+.ill .s-muted,
+.ill .s-face,
+.ill .s-bg,
+.ill .s-skin {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ill .s-accent { stroke: var(--accent); }
+.ill .s-ink { stroke: var(--text); }
+.ill .s-strong { stroke: var(--border-strong); }
+.ill .s-muted { stroke: var(--muted); }
+.ill .s-face { stroke: var(--face); stroke-width: 2; }
+.ill .s-bg { stroke: var(--card-bg); }
+.ill .s-skin { stroke: var(--skin); }
+
+.ill .w2 { stroke-width: 2; }
+.ill .w4 { stroke-width: 4; }
+.ill .arm { stroke-width: 10; }
+.ill .sleeve { stroke-width: 14; }
+.ill .pencil { stroke-width: 6; }
+.ill .dash { stroke-dasharray: 5 6; }
+
+.ill .f-accent { fill: var(--accent); }
+.ill .f-soft { fill: rgba(74, 124, 247, 0.2); }
+.ill .f-blob { fill: rgba(74, 124, 247, 0.07); }
+.ill .f-beam { fill: rgba(74, 124, 247, 0.16); }
+.ill .f-ink { fill: var(--text); }
+.ill .f-muted { fill: var(--muted); }
+.ill .f-strong { fill: var(--border-strong); }
+.ill .f-panel { fill: var(--input-bg); }
+.ill .f-screen { fill: var(--brand-bg); }
+.ill .f-skin { fill: var(--skin); }
+.ill .f-hair { fill: var(--hair); }
+.ill .f-face { fill: var(--face); }
+.ill .f-spine { fill: rgba(0, 0, 0, 0.25); }
+.ill .f-shadow { fill: rgba(0, 0, 0, 0.45); }
+
+.ill .float {
+  animation: ill-float 4s ease-in-out infinite;
+}
+
+@keyframes ill-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ill .float {
+    animation: none;
+  }
 }
 
 /* ---------- CTA ---------- */
@@ -157,7 +185,7 @@
   padding: 1rem 0 3rem;
 }
 
-.about-page .about-cta-btn {
+.public .about-cta-btn {
   display: inline-flex;
   align-items: center;
   height: 44px;
@@ -169,6 +197,6 @@
   font-weight: 600;
 }
 
-.about-page .about-cta-btn:hover {
+.public .about-cta-btn:hover {
   filter: brightness(0.92);
 }

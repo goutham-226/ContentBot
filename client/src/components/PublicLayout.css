@@ -1,0 +1,80 @@
+/* Theme tokens live in index.css */
+.public {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--side-bg);
+  color: var(--text);
+}
+
+.public a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.public-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem clamp(1rem, 4vw, 2.5rem);
+  background: var(--brand-bg);
+  border-bottom: 1px solid #1c1c1c;
+}
+
+.public-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'Grand Hotel', cursive;
+  font-size: 1.75rem;
+  line-height: 1;
+}
+
+.public-brand img {
+  width: 32px;
+  height: 32px;
+}
+
+.public-nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  font-size: 0.875rem;
+}
+
+.public .public-nav a:not(.public-login) {
+  color: var(--muted);
+}
+
+.public .public-nav a:not(.public-login):hover,
+.public .public-nav a.active:not(.public-login) {
+  color: var(--text);
+}
+
+.public .public-login {
+  padding: 8px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.public .public-login:hover {
+  background: #2a2a2a;
+}
+
+.public-main {
+  flex: 1;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+/* The footer repeats these links, so drop them where space is tight. */
+@media (max-width: 560px) {
+  .public .public-nav a:not(.public-login) {
+    display: none;
+  }
+}

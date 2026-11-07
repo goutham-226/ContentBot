@@ -1,0 +1,83 @@
+.help-hero {
+  padding: clamp(3rem, 8vw, 5rem) 0 2.5rem;
+  text-align: center;
+}
+
+.help-hero h1 {
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.help-hero p {
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 1.0625rem;
+}
+
+.help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.help-item {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.help-item[open] {
+  border-color: var(--border-strong);
+}
+
+.help-item summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.25rem;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-lg);
+}
+
+.help-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.help-item summary::after {
+  content: '+';
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 1.25rem;
+  font-weight: 400;
+  transition: transform 0.15s;
+}
+
+.help-item[open] summary::after {
+  transform: rotate(45deg);
+}
+
+.help-item p {
+  padding: 0 1.25rem 1.25rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.help-more {
+  padding: 2.5rem 0 4rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+.public .help-more a {
+  color: var(--accent);
+}
+
+.public .help-more a:hover {
+  text-decoration: underline;
+}

@@ -6,7 +6,8 @@ export default function Footer() {
     <footer className="footer">
       <nav className="footer-nav" aria-label="Footer">
         <Link to="/about">About</Link>
-        <a href="#">Help</a>
+        <Link to="/pricing">Pricing</Link>
+        <Link to="/help">Help</Link>
         <a href="#">Privacy</a>
         <a href="#">Terms</a>
       </nav>
