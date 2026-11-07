@@ -6,18 +6,22 @@ import FloatingInput from './FloatingInput';
 
 type LoginResponse = { user: string };
 
-// Placeholder until the backend exists.
-function fakeLogin(identifier: string, password: string): Promise<LoginResponse> {
-  // TODO: replace with the real API call, e.g. POST /api/auth/login
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      if (password === 'password123') {
-        resolve({ user: identifier });
-      } else {
-        reject(new Error('Sorry, your password was incorrect.'));
-      }
-    }, 1000);
+async function login(identifier: string, password: string): Promise<LoginResponse> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password }),
   });
+  const data: unknown = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const message =
+      data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+        ? data.error
+        : 'Something went wrong. Please try again.';
+    throw new Error(message);
+  }
+  return data as LoginResponse;
 }
 
 export default function LoginPage() {
@@ -38,7 +42,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await fakeLogin(identifier.trim(), password);
+      const res = await login(identifier.trim(), password);
       alert(`Logged in as ${res.user}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
