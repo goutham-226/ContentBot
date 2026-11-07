@@ -10,7 +10,7 @@ const faqs = [
   },
   {
     q: 'How do I create a bot?',
-    a: 'Log in, click “New bot” at the top of the sidebar, pick up to 3 niches, then press “Create bot”.',
+    a: 'Log in and click “New bot” at the top of the sidebar. Pick up to 3 niches and press “Next”, pick a video style for your channel identity or choose your own, then add supporting images (optional for built-in styles, at least one for your own) and press “Create bot”.',
   },
   {
     q: 'What does “reads the top articles” mean?',

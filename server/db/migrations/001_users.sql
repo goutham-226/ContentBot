@@ -1,4 +1,4 @@
--- Runs once, when the Postgres volume is first created.
+-- Applied by server/src/migrate.ts on startup.
 CREATE EXTENSION IF NOT EXISTS citext;
 
 CREATE TABLE IF NOT EXISTS users (

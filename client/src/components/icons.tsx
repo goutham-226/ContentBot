@@ -84,10 +84,44 @@ export function LogoutIcon() {
   );
 }
 
+export function ImageIcon() {
+  return (
+    <Icon>
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+      <circle cx="9" cy="10" r="1.8" />
+      <path d="M21 16l-5-5-9 9" />
+    </Icon>
+  );
+}
+
+export function XIcon() {
+  return (
+    <Icon>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </Icon>
+  );
+}
+
 export function CheckIcon() {
   return (
     <Icon>
       <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Icon>
+  );
+}
+
+export function TrashIcon() {
+  return (
+    <Icon>
+      <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />
+    </Icon>
+  );
+}
+
+export function SendIcon() {
+  return (
+    <Icon>
+      <path d="M12 19V5M6 11l6-6 6 6" />
     </Icon>
   );
 }

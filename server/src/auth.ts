@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { pool } from './db.ts';
 import type { UserRow } from './db.ts';
 import { hashPassword, verifyPassword } from './password.ts';
+import { endSession, getSessionUser, startSession } from './session.ts';
 
 export const authRouter = Router();
 
@@ -128,6 +129,21 @@ authRouter.post('/login', async (req, res) => {
     return;
   }
 
-  // TODO: issue a session cookie or token here.
+  await startSession(res, user.id);
   res.json({ user: user.username });
+});
+
+// GET /api/auth/me: who is logged in, or 401.
+authRouter.get('/me', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Not logged in.' });
+    return;
+  }
+  res.json({ user: { username: user.username, email: user.email } });
+});
+
+authRouter.post('/logout', async (req, res) => {
+  await endSession(req, res);
+  res.status(204).end();
 });

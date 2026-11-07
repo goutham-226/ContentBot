@@ -7,6 +7,9 @@ if (!DATABASE_URL) {
 
 export const pool = new pg.Pool({ connectionString: DATABASE_URL });
 
+// An idle client losing its connection (e.g. the database restarting) shouldn't crash the API.
+pool.on('error', (err) => console.error('Postgres idle client error:', err.message));
+
 export type UserRow = {
   id: string;
   username: string;

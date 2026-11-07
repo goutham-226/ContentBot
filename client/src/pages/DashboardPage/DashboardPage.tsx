@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { MouseEvent } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import './DashboardPage.css';
-import { joinNiches } from './bots';
 import type { Bot, BotsContext } from './bots';
+import { createBot, deleteBot, getMe, listBots, logout, saveCharacter } from '../../api';
+import type { NewBotInput, SessionUser } from '../../api';
+import BotAvatar from './BotAvatar';
 import {
   HelpIcon, InfoIcon, LogoutIcon, MenuIcon, RobotIcon, SidebarIcon, TagIcon,
 } from '../../components/icons';
@@ -16,33 +18,69 @@ const INFO_LINKS = [
   { to: '/app/help', label: 'Help', Icon: HelpIcon },
 ];
 
-// Set by LoginPage when it redirects here.
-function loggedInAs(state: unknown): string {
-  return state && typeof state === 'object' && 'user' in state && typeof state.user === 'string'
-    ? state.user
-    : '';
-}
-
 export default function DashboardPage() {
   const location = useLocation();
-  // Read once: location.state is per history entry, so it's gone after the first click.
-  const [user] = useState(() => loggedInAs(location.state));
-  // TODO: load and save bots through the API once sessions exist.
+  const navigate = useNavigate();
+  const [user, setUser] = useState<SessionUser | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const onNewBotScreen = location.pathname.replace(/\/$/, '') === '/app';
 
-  function addBot(niches: string[]): Bot {
-    const bot: Bot = {
-      id: crypto.randomUUID(),
-      name: `${joinNiches(niches)} Bot`,
-      niches,
-      createdAt: Date.now(),
+  // Who's logged in, and their saved bots. No session sends them to the login page.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await getMe();
+        if (cancelled) return;
+        if (!me) {
+          navigate('/', { replace: true });
+          return;
+        }
+        setUser(me);
+        const saved = await listBots();
+        if (!cancelled) setBots(saved);
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Couldn’t load your bots.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
+  }, [navigate]);
+
+  async function addBot(input: NewBotInput): Promise<Bot> {
+    const bot = await createBot(input);
     setBots((prev) => [bot, ...prev]);
     return bot;
+  }
+
+  async function removeBot(botId: string) {
+    await deleteBot(botId);
+    setBots((prev) => prev.filter((b) => b.id !== botId));
+  }
+
+  async function refreshBots() {
+    setBots(await listBots());
+  }
+
+  async function approveCharacter(botId: string, text: string, second: string) {
+    const updated = await saveCharacter(botId, text, second);
+    setBots((prev) => prev.map((b) => (b.id === botId ? updated : b)));
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } finally {
+      navigate('/', { replace: true });
+    }
   }
 
   // Like ChatGPT's "New chat": already on a fresh new-bot screen means nothing changes,
@@ -61,7 +99,7 @@ export default function DashboardPage() {
   }
 
   const closeDrawer = () => setDrawerOpen(false);
-  const context: BotsContext = { bots, addBot };
+  const context: BotsContext = { bots, loading, addBot, removeBot, approveCharacter, refreshBots };
 
   return (
     <div className={`dash ${collapsed ? 'dash--collapsed' : ''}`}>
@@ -95,8 +133,10 @@ export default function DashboardPage() {
         </Link>
 
         <section className="dock-bots-section" aria-labelledby="bots-heading">
-          <h2 id="bots-heading" className="dock-heading dock-label">Bots</h2>
-          {bots.length === 0 ? (
+          <h2 id="bots-heading" className="dock-heading dock-label">Your bots</h2>
+          {loading ? (
+            <p className="dock-empty dock-label">Loading…</p>
+          ) : bots.length === 0 ? (
             <p className="dock-empty dock-label">Your bots will appear here.</p>
           ) : (
             <ul className="dock-bots">
@@ -108,7 +148,7 @@ export default function DashboardPage() {
                     onClick={closeDrawer}
                     title={bot.name}
                   >
-                    <span className="dock-avatar" aria-hidden="true">{bot.name.charAt(0)}</span>
+                    <BotAvatar color={bot.color} />
                     <span className="dock-label dock-bot-name">{bot.name}</span>
                   </NavLink>
                 </li>
@@ -135,14 +175,20 @@ export default function DashboardPage() {
 
         <div className="dock-profile">
           <span className="dock-avatar dock-avatar--user" aria-hidden="true">
-            {(user || '?').charAt(0).toUpperCase()}
+            {(user?.username ?? '?').charAt(0).toUpperCase()}
           </span>
           <span className="dock-label dock-user">
-            <span className="dock-user-name">{user || 'Guest'}</span>
+            <span className="dock-user-name">{user?.username ?? ''}</span>
           </span>
-          <Link to="/" className="dock-icon-btn dock-logout" aria-label="Log out" title="Log out">
+          <button
+            type="button"
+            className="dock-icon-btn dock-logout"
+            onClick={handleLogout}
+            aria-label="Log out"
+            title="Log out"
+          >
             <LogoutIcon />
-          </Link>
+          </button>
         </div>
       </aside>
 
@@ -158,6 +204,7 @@ export default function DashboardPage() {
         </header>
 
         <main className="canvas">
+          {loadError && <p className="canvas-error" role="alert">{loadError}</p>}
           <Outlet context={context} />
         </main>
       </div>
