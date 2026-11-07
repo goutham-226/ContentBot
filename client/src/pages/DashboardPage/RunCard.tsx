@@ -23,7 +23,8 @@ const VERBS: Record<Run['kind'], [string, string]> = {
 
 // Like Claude's thinking: open and live while working, collapsed to a
 // one-line summary once done.
-function Thinking({ run }: { run: Run }) {
+function Thinking({ run, onCancel }: { run: Run; onCancel: () => Promise<void> }) {
+  const [canceling, setCanceling] = useState(false);
   const active = ACTIVE.has(run.status);
   const [open, setOpen] = useState(active);
   const [now, setNow] = useState(() => Date.now());
@@ -51,6 +52,8 @@ function Thinking({ run }: { run: Run }) {
         ? `${doing}… ${formatDuration(end - start)}`
         : run.status === 'failed'
           ? `Stopped after ${formatDuration(end - start)}`
+          : run.status === 'canceled'
+            ? `Canceled after ${formatDuration(end - start)}`
           : `${done} for ${formatDuration(end - start)}`;
 
   if (run.steps.length === 0 && !active) return null;
@@ -62,6 +65,19 @@ function Thinking({ run }: { run: Run }) {
         <span>{label}</span>
         <span className="thinking-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
       </button>
+      {active && (
+        <button
+          type="button"
+          className="thinking-cancel"
+          disabled={canceling}
+          onClick={() => {
+            setCanceling(true);
+            onCancel().catch(() => setCanceling(false));
+          }}
+        >
+          {canceling ? 'Canceling…' : 'Cancel'}
+        </button>
+      )}
       {open && (
         <ol className="thinking-steps" aria-live={active ? 'polite' : undefined}>
           {run.steps.map((s) => (
@@ -190,11 +206,12 @@ function ProductionView({ production }: { production: Production }) {
   );
 }
 
-export default function RunCard({ run, latest, onApprove, onReresearch }: {
+export default function RunCard({ run, latest, onApprove, onReresearch, onCancel }: {
   run: Run;
   latest: boolean; // only the newest research can be approved
   onApprove: (notes: string) => Promise<void>;
   onReresearch: (notes: string) => Promise<void>;
+  onCancel: () => Promise<void>;
 }) {
   const images = run.media.filter((m) => m.kind === 'image');
   const audio = run.media.filter((m) => m.kind === 'audio');
@@ -202,7 +219,7 @@ export default function RunCard({ run, latest, onApprove, onReresearch }: {
 
   return (
     <li className="run-card">
-      <Thinking run={run} />
+      <Thinking run={run} onCancel={onCancel} />
 
       {run.archived && (
         <p className="run-archived">
@@ -245,6 +262,11 @@ export default function RunCard({ run, latest, onApprove, onReresearch }: {
       )}
 
       {run.status === 'failed' && run.error && <p className="chat-error" role="alert">{run.error}</p>}
+      {run.chargedCents > 0 && (
+        <p className="run-charged">
+          {ACTIVE.has(run.status) ? 'Charged so far' : 'Charged'}: ${(run.chargedCents / 100).toFixed(2)}
+        </p>
+      )}
       {run.status === 'awaiting_approval' && latest && !run.archived && (
         <Approval onApprove={onApprove} onReresearch={onReresearch} />
       )}

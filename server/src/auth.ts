@@ -3,6 +3,7 @@ import { pool } from './db.ts';
 import type { UserRow } from './db.ts';
 import { hashPassword, verifyPassword } from './password.ts';
 import { endSession, getSessionUser, startSession } from './session.ts';
+import { balance } from './credits.ts';
 
 export const authRouter = Router();
 
@@ -140,7 +141,7 @@ authRouter.get('/me', async (req, res) => {
     res.status(401).json({ error: 'Not logged in.' });
     return;
   }
-  res.json({ user: { username: user.username, email: user.email } });
+  res.json({ user: { username: user.username, email: user.email, creditsCents: await balance(user.id) } });
 });
 
 authRouter.post('/logout', async (req, res) => {

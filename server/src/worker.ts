@@ -19,14 +19,18 @@ import { ORIGINALITY_RULE, styleFor } from './character.ts';
 import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
 import {
-  download, generateImage, generateSpeech, generateText, generateVideo, MODELS, uploadFile,
+  cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, MODELS, uploadFile,
 } from './replicate.ts';
 import { stitchClips } from './stitch.ts';
+import { charge, OutOfCreditsError, PRICES } from './credits.ts';
+import { CanceledError, runContext, throwIfCanceled } from './runContext.ts';
+import type { RunContext } from './runContext.ts';
 import { readArticle, searchGoogleNews, searchHackerNews } from './web.ts';
 import type { Article } from './web.ts';
 
 const TICK_MS = 3000;
 const HEARTBEAT_MS = 30_000;
+const CANCEL_CHECK_MS = 2000;
 const STALE_AFTER = '3 minutes';
 const CLEANUP_EVERY_MS = 10 * 60_000;
 const COLD_AFTER = '7 days';
@@ -53,6 +57,7 @@ type RunRow = {
 };
 
 type BotContext = {
+  user_id: string;
   name: string;
   niches: string[];
   identity_preset: string | null;
@@ -190,20 +195,43 @@ async function claimAndRun() {
     void pool.query('UPDATE runs SET heartbeat_at = now() WHERE id = $1', [run.id]).catch(() => {});
   }, HEARTBEAT_MS);
 
+  // Watch for the user cancelling: stop new work and cancel Replicate jobs in flight.
+  const ctx: RunContext = { runId: run.id, canceled: false, predictions: new Set() };
+  const watcher = setInterval(() => {
+    pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [run.id])
+      .then(({ rows }) => {
+        if (rows[0]?.status !== 'canceled' || ctx.canceled) return;
+        ctx.canceled = true;
+        for (const id of ctx.predictions) void cancelPrediction(id);
+      })
+      .catch(() => {});
+  }, CANCEL_CHECK_MS);
+
   try {
-    if (run.kind === 'character') await drawCharacter(run);
-    else if (run.kind === 'research') await research(run);
-    else await produce(run);
+    await runContext.run(ctx, async () => {
+      if (run.kind === 'character') await drawCharacter(run);
+      else if (run.kind === 'research') await research(run);
+      else await produce(run);
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Something went wrong.';
-    await step(run.id, 'error', 'Stopped', message).catch(() => {});
-    await finish(run.id, 'failed', null, message);
+    if (err instanceof CanceledError) {
+      await pool.query('INSERT INTO run_steps (run_id, kind, title, detail) VALUES ($1, $2, $3, $4)', [
+        run.id, 'error', 'Canceled', 'You’re only charged for the parts that finished.',
+      ]);
+      await pool.query('UPDATE runs SET finished_at = now() WHERE id = $1', [run.id]);
+    } else {
+      const message = err instanceof Error ? err.message : 'Something went wrong.';
+      await step(run.id, 'error', 'Stopped', message).catch(() => {});
+      await finish(run.id, 'failed', null, message);
+    }
   } finally {
     clearInterval(heartbeat);
+    clearInterval(watcher);
   }
 }
 
 async function step(runId: string, kind: StepKind, title: string, detail = '') {
+  throwIfCanceled();
   await pool.query('INSERT INTO run_steps (run_id, kind, title, detail) VALUES ($1, $2, $3, $4)', [
     runId, kind, title.slice(0, 300), detail.slice(0, 4000),
   ]);
@@ -215,8 +243,9 @@ async function finish(
   result: unknown,
   error: string | null = null,
 ) {
+  // A cancelled run stays cancelled.
   await pool.query(
-    'UPDATE runs SET status = $2, result = $3, error = $4, finished_at = now() WHERE id = $1',
+    `UPDATE runs SET status = $2, result = $3, error = $4, finished_at = now() WHERE id = $1 AND status <> 'canceled'`,
     [runId, status, result === null ? null : JSON.stringify(result), error],
   );
 }
@@ -278,7 +307,7 @@ const strList = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string =>
 
 async function loadBot(botId: string): Promise<BotContext> {
   const { rows } = await pool.query<BotContext>(
-    `SELECT name, niches, identity_preset, identity_name, identity_description, character, character2
+    `SELECT user_id, name, niches, identity_preset, identity_name, identity_description, character, character2
        FROM bots WHERE id = $1`,
     [botId],
   );
@@ -415,6 +444,7 @@ What made these perform well, and what is worth using? Reply with JSON only:
       ...topHeadlines.slice(0, 5).map(({ title, url, source, points }) => ({ title, url, source, points, kind: 'headline' as const })),
     ],
   };
+  await charge(bot.user_id, run.id, PRICES.research, 'Research');
   await step(run.id, 'think', 'Research done. Waiting for your approval');
   await finish(run.id, 'awaiting_approval', findings);
 }
@@ -444,10 +474,12 @@ async function referenceUrls(botId: string): Promise<string[]> {
 }
 
 // Runs a media job; a failure is shown as a step instead of stopping the run.
+// Cancelling and running out of credits do stop the run.
 async function attempt(runId: string, failTitle: string, job: () => Promise<string>) {
   try {
     return await job();
   } catch (err) {
+    if (err instanceof CanceledError || err instanceof OutOfCreditsError) throw err;
     await step(runId, 'error', failTitle, err instanceof Error ? err.message : '');
     return null;
   }
@@ -643,6 +675,7 @@ Write in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds 
   };
   // Save the script now so it shows up even while the media is still rendering.
   await pool.query('UPDATE runs SET result = $2 WHERE id = $1', [run.id, JSON.stringify(production)]);
+  await charge(bot.user_id, run.id, PRICES.script, 'Script');
   await step(run.id, 'write', `Wrote “${production.title}” in ${scenes.length} scenes`, production.ideas.map((i) => `• ${i.title}`).join('\n'));
   await clearKnowledge(researchId); // the knowledge base was only needed for the script
 
@@ -659,12 +692,15 @@ Write in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds 
     Promise.all(scenes.map((sc, i) => attempt(run.id, `Couldn’t draw frame ${i + 1}`, async () => {
       const url = await generateImage(original(`${sc.frame || sc.video}\nStyle: ${styleOf(bot)}`), references);
       await saveMedia(run.id, 'image', `Scene ${i + 1}`, url);
+      await charge(bot.user_id, run.id, PRICES.frame, `Storyboard frame ${i + 1}`);
       await step(run.id, 'image', `Scene ${i + 1} frame drawn`);
       return url;
     }))),
     Promise.all(voiceJobs.map((j) => attempt(run.id, `Couldn’t record ${j.character.name} for scene ${j.scene + 1}`, async () => {
       const url = await generateSpeech(j.text, voiceDescription(j.character.text));
       await saveMedia(run.id, 'audio', `Scene ${j.scene + 1} — ${j.character.name}`, url);
+      const voicesInScene = voiceJobs.filter((v) => v.scene === j.scene).length;
+      await charge(bot.user_id, run.id, Math.round(PRICES.sceneVoice / voicesInScene), `Scene ${j.scene + 1} voice`);
       await step(run.id, 'audio', `Scene ${j.scene + 1}: ${j.character.name}’s voice recorded`);
       return url;
     }))),
@@ -692,6 +728,7 @@ Write in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds 
     const url = await attempt(run.id, `Couldn’t render clip ${i + 1}`, async () => {
       const clipUrl = await generateVideo(original(sc.video || sc.frame), { images, audio, videos }, SCENE_SECONDS);
       clips.push(await saveMedia(run.id, 'video', `Clip ${i + 1}`, clipUrl));
+      await charge(bot.user_id, run.id, PRICES.clip, `Clip ${i + 1}`);
       await step(run.id, 'video', `Clip ${i + 1} ready`);
       return clipUrl;
     });

@@ -6,6 +6,7 @@ import type { Response } from 'express';
 import { pool } from './db.ts';
 import { clearKnowledge } from './knowledge.ts';
 import { MESSAGE_MAX } from './catalog.ts';
+import { balance, dollars, PRICES, PRODUCTION_PRICE } from './credits.ts';
 import { currentUser, requireAuth } from './session.ts';
 
 export const chatRouter = Router();
@@ -31,6 +32,7 @@ type RunRow = {
   started_at: Date | null;
   finished_at: Date | null;
   archived_at: Date | null;
+  charged_cents: number;
   steps: { id: string; kind: string; title: string; detail: string; created_at: string }[];
   media: { id: string; kind: string; label: string }[];
 };
@@ -57,6 +59,7 @@ function toRunDto(botId: string, row: RunRow) {
     startedAt: row.started_at?.toISOString() ?? null,
     finishedAt: row.finished_at?.toISOString() ?? null,
     archived: row.archived_at !== null,
+    chargedCents: row.charged_cents,
     steps: row.steps.map((s) => ({ id: s.id, kind: s.kind, title: s.title, detail: s.detail, createdAt: s.created_at })),
     media: row.media.map((m) => ({ id: m.id, kind: m.kind, label: m.label, url: `/api/bots/${botId}/media/${m.id}` })),
   };
@@ -65,6 +68,7 @@ function toRunDto(botId: string, row: RunRow) {
 const SELECT_RUNS = `
   SELECT r.id, r.message_id, r.parent_run_id, r.kind, r.idea, r.feedback, r.surprise, r.status, r.error,
          r.result, r.created_at, r.started_at, r.finished_at, r.archived_at,
+         COALESCE((SELECT -SUM(l.amount_cents) FROM credit_ledger l WHERE l.run_id = r.id), 0)::int AS charged_cents,
          COALESCE((SELECT json_agg(json_build_object(
                      'id', s.id, 'kind', s.kind, 'title', s.title, 'detail', s.detail, 'created_at', s.created_at
                    ) ORDER BY s.id) FROM run_steps s WHERE s.run_id = r.id), '[]') AS steps,
@@ -173,12 +177,23 @@ chatRouter.post('/:botId/messages', async (req, res) => {
     res.status(409).json({ error: 'Approve your character first.' });
     return;
   }
+  if (!(await canAfford(res, PRICES.research, 'Researching an idea'))) return;
   res.status(201).json(
     await startRun(botId, surprise ? 'Surprise me!' : body, {
       kind: 'research', idea: surprise ? '' : body, surprise, feedback: '', parentRunId: null,
     }),
   );
 });
+
+// 402 with a clear message when the balance can't cover `cents`.
+async function canAfford(res: Response, cents: number, what: string): Promise<boolean> {
+  const have = await balance(currentUser(res).id);
+  if (have >= cents) return true;
+  res.status(402).json({
+    error: `${what} needs ${dollars(cents)} in credits, and your balance is ${dollars(have)}.`,
+  });
+  return false;
+}
 
 // Shared by approve and re-research: the run must be research awaiting approval.
 async function takeResearch(botId: string, runId: string, res: Response) {
@@ -202,6 +217,7 @@ async function takeResearch(botId: string, runId: string, res: Response) {
 chatRouter.post('/:botId/runs/:runId/approve', async (req, res) => {
   const { botId, runId } = req.params;
   const notes = notesFrom(req.body).slice(0, NOTES_MAX);
+  if (!(await canAfford(res, PRODUCTION_PRICE, 'Making this video'))) return;
   const research = await takeResearch(botId, runId, res);
   if (!research) return;
   res.status(201).json(
@@ -215,6 +231,7 @@ chatRouter.post('/:botId/runs/:runId/approve', async (req, res) => {
 chatRouter.post('/:botId/runs/:runId/reresearch', async (req, res) => {
   const { botId, runId } = req.params;
   const notes = notesFrom(req.body).slice(0, NOTES_MAX);
+  if (!(await canAfford(res, PRICES.research, 'Researching again'))) return;
   const research = await takeResearch(botId, runId, res);
   if (!research) return;
   await clearKnowledge(runId);
@@ -223,6 +240,27 @@ chatRouter.post('/:botId/runs/:runId/reresearch', async (req, res) => {
       kind: 'research', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId,
     }),
   );
+});
+
+// POST /api/bots/:botId/runs/:runId/cancel — stops a run mid-generation. The
+// worker notices within seconds, cancels its Replicate jobs, and the user keeps
+// (and is charged for) only the parts that finished.
+chatRouter.post('/:botId/runs/:runId/cancel', async (req, res) => {
+  const { botId, runId } = req.params;
+  if (!(await ownsBot(botId, res))) return;
+  const { rowCount } = UUID_RE.test(runId)
+    ? await pool.query(
+        `UPDATE runs SET status = 'canceled',
+                         finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END
+          WHERE id = $1 AND bot_id = $2 AND status IN ('queued', 'running')`,
+        [runId, botId],
+      )
+    : { rowCount: 0 };
+  if (!rowCount) {
+    res.status(409).json({ error: 'This isn’t running any more.' });
+    return;
+  }
+  res.json({ run: await getRun(botId, runId) });
 });
 
 const ASSETS = ['character', 'character_sheet', 'channel_avatar', 'channel_banner'];

@@ -74,13 +74,14 @@ export type Run = {
   messageId: string | null;
   parentRunId: string | null;
   kind: 'character' | 'research' | 'production';
-  status: 'queued' | 'running' | 'awaiting_approval' | 'done' | 'failed';
+  status: 'queued' | 'running' | 'awaiting_approval' | 'done' | 'failed' | 'canceled';
   error: string | null;
   result: Findings | Production | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
   archived: boolean; // research, scripts and storyboards are cleared after a week unused
+  chargedCents: number; // charged so far, part by part
   steps: RunStep[];
   media: RunMedia[];
 };
@@ -92,6 +93,7 @@ export type BotsContext = {
   removeBot: (botId: string) => Promise<void>;
   approveCharacter: (botId: string, text: string, second: string) => Promise<void>;
   refreshBots: () => Promise<void>;
+  refreshBalance: () => Promise<void>;
 };
 
 // Shared with the panels rendered in DashboardPage's <Outlet>.

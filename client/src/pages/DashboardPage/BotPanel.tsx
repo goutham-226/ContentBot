@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useBots } from './bots';
 import type { Bot, BotImage, BotMessage, Run } from './bots';
-import { approveResearch, getThread, regenerateIdentity, reresearch, sendIdea } from '../../api';
+import { approveResearch, cancelRun, getThread, regenerateIdentity, reresearch, sendIdea } from '../../api';
 import type { IdentityAsset } from '../../api';
 import RunCard from './RunCard';
 import BotAvatar from './BotAvatar';
@@ -352,7 +352,7 @@ const POLL_MS = 3000;
 
 // The thread: the user's ideas and the bot's runs, kept fresh while anything is working.
 function Chat({ bot, version }: { bot: Bot; version: number }) {
-  const { refreshBots } = useBots();
+  const { refreshBots, refreshBalance } = useBots();
   const [messages, setMessages] = useState<BotMessage[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -395,10 +395,11 @@ function Chat({ bot, version }: { bot: Bot; version: number }) {
   useEffect(() => {
     if (!working) return;
     const timer = setInterval(() => {
-      load().catch(() => {});
+      // Charges land as parts finish, so keep the balance current too.
+      Promise.all([load(), refreshBalance()]).catch(() => {});
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [working, load]);
+  }, [working, load, refreshBalance]);
 
   // The AI character lives on the bot, so refresh it once it's drawn.
   const [wasDrawing, setWasDrawing] = useState(false);
@@ -480,6 +481,10 @@ function Chat({ bot, version }: { bot: Bot; version: number }) {
                 latest={item.run.id === latestResearchId}
                 onApprove={(notes) => start(() => approveResearch(bot.id, item.run!.id, notes))}
                 onReresearch={(notes) => start(() => reresearch(bot.id, item.run!.id, notes))}
+                onCancel={async () => {
+                  await cancelRun(bot.id, item.run!.id);
+                  await Promise.all([load(), refreshBalance()]);
+                }}
               />
             )}
           </Fragment>

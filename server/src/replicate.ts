@@ -1,6 +1,8 @@
 // Minimal Replicate HTTP client: start a prediction, wait for it, return the output.
 // https://replicate.com/docs/reference/http
 
+import { CanceledError, runContext, throwIfCanceled } from './runContext.ts';
+
 const API_BASE = process.env.REPLICATE_API_BASE ?? 'https://api.replicate.com/v1';
 const POLL_MS = 2000;
 const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
@@ -96,6 +98,7 @@ async function startPrediction(model: string, input: Record<string, unknown>): P
 async function createPrediction(model: string, input: Record<string, unknown>): Promise<Prediction> {
   for (let attempt = 0; ; attempt++) {
     await createSlot();
+    throwIfCanceled(); // may have been cancelled while queued
     try {
       return await startPrediction(model, input);
     } catch (err) {
@@ -108,15 +111,31 @@ async function createPrediction(model: string, input: Record<string, unknown>): 
   }
 }
 
-async function predict(model: string, input: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
-  let prediction = await createPrediction(model, input);
+// Stops a prediction on Replicate (so it stops billing). Best effort.
+export async function cancelPrediction(id: string) {
+  await api(`${API_BASE}/predictions/${id}/cancel`, { method: 'POST' }).catch(() => {});
+}
 
-  const deadline = Date.now() + timeoutMs;
-  while (prediction.status === 'starting' || prediction.status === 'processing') {
-    if (Date.now() > deadline) throw new ReplicateError(`${model} took too long.`);
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    prediction = await api<Prediction>(prediction.urls?.get ?? `${API_BASE}/predictions/${prediction.id}`);
+async function predict(model: string, input: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  throwIfCanceled();
+  const ctx = runContext.getStore();
+  let prediction = await createPrediction(model, input);
+  ctx?.predictions.add(prediction.id);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (prediction.status === 'starting' || prediction.status === 'processing') {
+      if (ctx?.canceled) {
+        await cancelPrediction(prediction.id);
+        throw new CanceledError();
+      }
+      if (Date.now() > deadline) throw new ReplicateError(`${model} took too long.`);
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      prediction = await api<Prediction>(prediction.urls?.get ?? `${API_BASE}/predictions/${prediction.id}`);
+    }
+  } finally {
+    ctx?.predictions.delete(prediction.id);
   }
+  throwIfCanceled();
   if (prediction.status !== 'succeeded') {
     throw new ReplicateError(`${model} ${prediction.status}: ${prediction.error ?? 'no details'}`);
   }

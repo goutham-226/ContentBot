@@ -1,6 +1,6 @@
 import type { Bot, BotMessage, Run } from './pages/DashboardPage/bots';
 
-export type SessionUser = { username: string; email: string };
+export type SessionUser = { username: string; email: string; creditsCents: number };
 
 // What the server needs to know about the chosen identity.
 export type IdentityInput = { presetId: string } | { name: string; description: string };
@@ -103,6 +103,10 @@ export type IdentityAsset = 'character' | 'character_sheet' | 'channel_avatar' |
 
 export function regenerateIdentity(botId: string, targets: IdentityAsset[], notes: string): Promise<Started> {
   return postJson(`/api/bots/${botId}/identity/regenerate`, { targets, notes });
+}
+
+export function cancelRun(botId: string, runId: string): Promise<{ run: Run }> {
+  return request(`/api/bots/${botId}/runs/${runId}/cancel`, { method: 'POST' });
 }
 
 export function approveResearch(botId: string, runId: string, notes: string): Promise<Started> {

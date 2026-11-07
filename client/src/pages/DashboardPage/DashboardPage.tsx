@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import './DashboardPage.css';
@@ -66,6 +66,12 @@ export default function DashboardPage() {
     setBots((prev) => prev.filter((b) => b.id !== botId));
   }
 
+  // Stable, so the chat's polling effect doesn't restart on every render.
+  const refreshBalance = useCallback(async () => {
+    const me = await getMe();
+    if (me) setUser(me);
+  }, []);
+
   async function refreshBots() {
     setBots(await listBots());
   }
@@ -99,7 +105,7 @@ export default function DashboardPage() {
   }
 
   const closeDrawer = () => setDrawerOpen(false);
-  const context: BotsContext = { bots, loading, addBot, removeBot, approveCharacter, refreshBots };
+  const context: BotsContext = { bots, loading, addBot, removeBot, approveCharacter, refreshBots, refreshBalance };
 
   return (
     <div className={`dash ${collapsed ? 'dash--collapsed' : ''}`}>
@@ -179,6 +185,11 @@ export default function DashboardPage() {
           </span>
           <span className="dock-label dock-user">
             <span className="dock-user-name">{user?.username ?? ''}</span>
+            {user && (
+              <span className="dock-user-credits" title="Available credits">
+                {`$${(user.creditsCents / 100).toFixed(2)} credits`}
+              </span>
+            )}
           </span>
           <button
             type="button"
