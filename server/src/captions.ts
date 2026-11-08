@@ -8,10 +8,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+import { createCanvas } from '@napi-rs/canvas';
 import type { SKRSContext2D } from '@napi-rs/canvas';
 import { pipeline } from '@huggingface/transformers';
 import type { AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
+import { FONT } from './fonts.ts';
 
 const execFileAsync = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_PATH ?? 'ffmpeg';
@@ -20,8 +21,6 @@ const FFPROBE = process.env.FFPROBE_PATH ?? 'ffprobe';
 const ASR_MODEL = 'Xenova/whisper-base.en'; // ~80 MB, downloaded once
 const SAMPLE_RATE = 16_000;
 
-// Montserrat (SIL Open Font License, assets/fonts/OFL.txt).
-GlobalFonts.registerFromPath(join(import.meta.dirname, '..', 'assets', 'fonts', 'Montserrat.ttf'), 'Montserrat');
 
 const MAX_WORDS = 3; // per caption
 const MAX_CHARS = 18;
@@ -179,7 +178,7 @@ const clean = (text: string) => text.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}!?%']+
 function drawCaption(ctx: SKRSContext2D, width: number, height: number, words: string[], active: number, scale: number) {
   ctx.clearRect(0, 0, width, height);
   let size = Math.round(width * 0.09 * scale);
-  const font = () => `900 ${size}px Montserrat`;
+  const font = () => `900 ${size}px ${FONT}`;
   ctx.font = font();
   const space = () => ctx.measureText(' ').width;
   const total = () => words.reduce((sum, w) => sum + ctx.measureText(w).width, 0) + space() * (words.length - 1);

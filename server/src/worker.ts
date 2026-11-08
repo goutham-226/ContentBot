@@ -25,6 +25,7 @@ import {
 } from './replicate.ts';
 import { mediaSeconds, stitchClips } from './stitch.ts';
 import { addCaptions } from './captions.ts';
+import { addBannerTitle } from './typeset.ts';
 import { charge, OutOfCreditsError, PRICES, refundRun } from './credits.ts';
 import { CanceledError, runContext, throwIfCanceled } from './runContext.ts';
 import type { RunContext } from './runContext.ts';
@@ -220,11 +221,15 @@ async function claimAndRun() {
         SET status = 'running', attempts = attempts + 1, heartbeat_at = now(),
             started_at = COALESCE(started_at, now())
       WHERE id = (
-        SELECT id FROM runs
-         WHERE status = 'queued'
-            OR (status = 'running' AND heartbeat_at < now() - interval '${STALE_AFTER}')
-         ORDER BY created_at
-         FOR UPDATE SKIP LOCKED
+        SELECT r.id FROM runs r
+         WHERE (r.status = 'queued' OR (r.status = 'running' AND r.heartbeat_at < now() - interval '${STALE_AFTER}'))
+           -- A bot's identity runs go one at a time, so each sees what the last one drew.
+           AND NOT (r.kind = 'character' AND EXISTS (
+             SELECT 1 FROM runs o
+              WHERE o.bot_id = r.bot_id AND o.kind = 'character' AND o.id <> r.id
+                AND o.status = 'running' AND o.heartbeat_at >= now() - interval '${STALE_AFTER}'))
+         ORDER BY r.created_at
+         FOR UPDATE OF r SKIP LOCKED
          LIMIT 1)
       RETURNING id, bot_id, parent_run_id, kind, idea, feedback, surprise, targets, attempts`,
   );
@@ -563,8 +568,17 @@ type Asset = 'character' | 'character_sheet' | 'channel_avatar' | 'channel_banne
 
 // Saves an identity image, replacing any earlier one of the same kind (only
 // once the new one has been drawn, so a failed regenerate loses nothing).
-async function saveAsset(botId: string, asset: Asset, characterIndex: 0 | 1 | null, filename: string, url: string) {
-  const { data, contentType } = await download(url);
+async function saveAsset(
+  botId: string,
+  asset: Asset,
+  characterIndex: 0 | 1 | null,
+  filename: string,
+  url: string,
+  finishing?: (image: Buffer) => Promise<Buffer>, // e.g. setting the channel name
+) {
+  const downloaded = await download(url);
+  const data = finishing ? await finishing(downloaded.data) : downloaded.data;
+  const contentType = finishing ? 'image/jpeg' : downloaded.contentType;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -653,13 +667,13 @@ async function drawCharacter(run: RunRow) {
       asset: 'channel_avatar' as const,
       name: 'channel profile picture',
       ratio: '1:1',
-      prompt: `A bold, simple channel profile picture for "${bot.name}": ${characters.length === 2 ? 'both characters’ faces' : 'the character’s face'}, centred, on a solid colour background, readable at small sizes. No text.`,
+      prompt: `A bold, simple channel profile picture: a head-and-shoulders close-up of ${characters.length === 2 ? 'both characters, side by side' : 'the character'}, centred, filling the frame, on a solid colour background, readable at small sizes. Absolutely no text, letters, logos or speech bubbles.`,
     },
     (targets ? targets.includes('channel_banner') : !has('channel_banner')) && {
       asset: 'channel_banner' as const,
       name: 'channel banner',
       ratio: '16:9',
-      prompt: `A wide YouTube channel banner for "${bot.name}", a channel about ${bot.niches.join(', ')}. ${characters.length === 2 ? 'Both characters' : 'The character'} on one side, themed scenery, and the channel name "${bot.name}" in clean, large lettering in the centre safe area.`,
+      prompt: `A wide YouTube channel banner for a channel about ${bot.niches.join(', ')}. ${characters.length === 2 ? 'Both characters' : 'The character'} on the left or right edge, themed scenery across the rest, and a calm, uncluttered area across the centre (a title will be added there later). Absolutely no text, letters, logos or speech bubbles.`,
     },
   ].filter((j) => j !== false);
 
@@ -672,7 +686,14 @@ async function drawCharacter(run: RunRow) {
         job.ratio,
         job.asset === 'channel_banner' ? 2 : 1,
       );
-      await saveAsset(run.bot_id, job.asset, null, `${bot.name} — ${job.name}`, url);
+      await saveAsset(
+        run.bot_id,
+        job.asset,
+        null,
+        `${bot.name} — ${job.name}`,
+        url,
+        job.asset === 'channel_banner' ? (image) => addBannerTitle(image, bot.name) : undefined,
+      );
       await step(run.id, 'image', `${job.name[0].toUpperCase()}${job.name.slice(1)} saved`);
       return url;
     });

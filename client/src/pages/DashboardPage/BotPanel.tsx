@@ -12,6 +12,7 @@ import { voiceLabel } from './voices';
 import { SendIcon, TrashIcon } from '../../components/icons';
 
 const MESSAGE_MAX = 4000;
+const CHANNEL_POLL_MS = 4000;
 
 const ASSET_TAGS: Record<NonNullable<BotImage['asset']>, string> = {
   character: 'AI character',
@@ -42,6 +43,34 @@ export default function BotPanel() {
   return <BotView key={bot.id} bot={bot} />;
 }
 
+// While the channel images are missing, keep an eye on their drawing (which
+// also lets the server retry a failed one) and reload the bot once they land.
+function useChannelDrawing(botId: string, missing: boolean): boolean {
+  const { refreshBots } = useBots();
+  const [drawing, setDrawing] = useState(false);
+  useEffect(() => {
+    if (!missing) return;
+    let cancelled = false;
+    let wasDrawing = true; // the bot in hand may predate a drawing that already finished
+    const check = () => getThread(botId)
+      .then(({ runs }) => {
+        if (cancelled) return;
+        const now = runs.some((r) => r.kind === 'character' && (r.status === 'queued' || r.status === 'running'));
+        setDrawing(now);
+        if (wasDrawing && !now) void refreshBots();
+        wasDrawing = now;
+      })
+      .catch(() => {});
+    void check();
+    const timer = setInterval(check, CHANNEL_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [botId, missing, refreshBots]);
+  return missing && drawing;
+}
+
 function BotView({ bot }: { bot: Bot }) {
   const { removeBot } = useBots();
   const navigate = useNavigate();
@@ -55,6 +84,7 @@ function BotView({ bot }: { bot: Bot }) {
   const characterImages = bot.images.filter((img) => !isChannelAsset(img));
   const avatar = bot.images.find((img) => img.asset === 'channel_avatar');
   const banner = bot.images.find((img) => img.asset === 'channel_banner');
+  const drawingChannel = useChannelDrawing(bot.id, !avatar || !banner);
 
   async function handleDelete() {
     setDeleting(true);
@@ -144,23 +174,34 @@ function BotView({ bot }: { bot: Bot }) {
         )}
       </section>
 
-      {(avatar || banner) && (
-        <section className="channel-kit" aria-labelledby="channel-kit-heading">
+      {(avatar || banner || drawingChannel) && (
+        <section className="channel-kit" aria-labelledby="channel-kit-heading" aria-busy={drawingChannel}>
           <h2 id="channel-kit-heading">Channel images</h2>
           <div className="channel-kit-row">
-            {avatar && (
+            {avatar ? (
               <figure>
                 <img className="channel-avatar" src={avatar.url} alt={`${bot.name} profile picture`} />
                 <a href={avatar.url} download={`${bot.name} profile picture`}>Download</a>
               </figure>
+            ) : (
+              <div className="channel-avatar channel-placeholder" aria-hidden="true" />
             )}
-            {banner && (
+            {banner ? (
               <figure className="channel-banner-fig">
                 <img className="channel-banner" src={banner.url} alt={`${bot.name} channel banner`} />
                 <a href={banner.url} download={`${bot.name} banner`}>Download</a>
               </figure>
+            ) : (
+              <div className="channel-banner-fig">
+                <div className="channel-banner channel-placeholder" aria-hidden="true" />
+              </div>
             )}
           </div>
+          {drawingChannel && (
+            <p className="channel-drawing" role="status">
+              Drawing your {!avatar && !banner ? 'profile picture and banner' : !avatar ? 'profile picture' : 'banner'}…
+            </p>
+          )}
         </section>
       )}
 

@@ -5,6 +5,7 @@ import { Router } from 'express';
 import type { Response } from 'express';
 import { pool } from './db.ts';
 import { clearKnowledge } from './knowledge.ts';
+import { healChannelImages } from './identity.ts';
 import { MESSAGE_MAX } from './catalog.ts';
 import { balance, dollars, PRICES, PRODUCTION_PRICE } from './credits.ts';
 import { currentUser, requireAuth } from './session.ts';
@@ -100,6 +101,7 @@ const notesFrom = (body: unknown) =>
 chatRouter.get('/:botId/thread', async (req, res) => {
   const { botId } = req.params;
   if (!(await ownsBot(botId, res))) return;
+  await healChannelImages(botId);
   await pool.query(
     `UPDATE runs SET last_viewed_at = now()
       WHERE bot_id = $1 AND archived_at IS NULL AND last_viewed_at < now() - interval '1 hour'`,

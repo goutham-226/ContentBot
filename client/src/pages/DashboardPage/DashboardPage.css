@@ -1799,3 +1799,29 @@
 .character-card .voice-picker {
   margin: 4px 0 12px;
 }
+
+/* Channel images still being drawn */
+.channel-placeholder {
+  display: block;
+  animation: channel-pulse 1.6s ease-in-out infinite;
+}
+
+div.channel-banner-fig {
+  display: flex;
+}
+
+.channel-drawing {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+@keyframes channel-pulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .channel-placeholder {
+    animation: none;
+  }
+}

@@ -9,6 +9,7 @@ import {
 } from './catalog.ts';
 import { draftCharacters, imageQueryFor } from './character.ts';
 import { findReferenceImages } from './referenceImages.ts';
+import { CHANNEL_ASSETS, cancelCharacterRuns, queueCharacterRun } from './identity.ts';
 
 export const botsRouter = Router();
 botsRouter.use(requireAuth);
@@ -267,6 +268,9 @@ botsRouter.post('/', upload.array('images', MAX_IMAGES), async (req, res) => {
         ],
       );
     }
+    // The channel profile picture and banner are drawn right away, from the
+    // draft characters; the rest of the identity pack waits for approval.
+    await queueCharacterRun(client, botId, CHANNEL_ASSETS);
     await client.query('COMMIT');
 
     const saved = await pool.query<BotRow>(`${SELECT_BOTS} WHERE b.id = $1 GROUP BY b.id`, [botId]);
@@ -336,33 +340,43 @@ botsRouter.put('/:botId/character', async (req, res) => {
     return;
   }
   const userId = currentUser(res).id;
-  const { rowCount } = UUID_RE.test(botId)
-    ? await pool.query(
-        `UPDATE bots SET character = $1, character2 = $2, character_approved = true,
-                voice = COALESCE($5, voice), voice2 = COALESCE($6, voice2)
-          WHERE id = $3 AND user_id = $4`,
+  const { rows: before } = UUID_RE.test(botId)
+    ? await pool.query<{ character: string; character2: string; character_approved: boolean }>(
+        `UPDATE bots b SET character = $1, character2 = $2, character_approved = true,
+                voice = COALESCE($5, b.voice), voice2 = COALESCE($6, b.voice2)
+           FROM (SELECT id, character, character2, character_approved FROM bots WHERE id = $3 FOR UPDATE) old
+          WHERE b.id = old.id AND b.user_id = $4
+          RETURNING old.character, old.character2, old.character_approved`,
         [text, second, botId, userId, voices?.[0] ?? null, voices?.[1] ?? null],
       )
-    : { rowCount: 0 };
-  if (!rowCount) {
+    : { rows: [] };
+  const old = before[0];
+  if (!old) {
     res.status(404).json({ error: 'Bot not found.' });
     return;
   }
-  // Draw whatever the identity pack is missing (character sheets, channel
-  // images), kept for good. A no-op once everything exists.
-  await pool.query(
-    `INSERT INTO runs (bot_id, kind)
-     SELECT $1, 'character'
-      WHERE NOT EXISTS (SELECT 1 FROM runs WHERE bot_id = $1 AND kind = 'character' AND status IN ('queued', 'running'))
-        AND (
+
+  const firstApproval = !old.character_approved;
+  const edited = old.character.trim() !== text || old.character2.trim() !== second;
+  if (firstApproval && edited) {
+    // The channel images were drawn from the draft: stop that and redraw them
+    // from the approved characters, after the portraits and sheets.
+    await cancelCharacterRuns(pool, botId);
+    await queueCharacterRun(pool, botId, null);
+    await queueCharacterRun(pool, botId, CHANNEL_ASSETS);
+  } else {
+    // Draw whatever the identity pack is missing (character sheets, channel
+    // images), kept for good. A no-op once everything exists.
+    const { rowCount: missing } = await pool.query(
+      `SELECT 1 WHERE
           NOT EXISTS (SELECT 1 FROM bot_images WHERE bot_id = $1 AND asset = 'character_sheet' AND character_index = 0)
           OR ($2 <> '' AND NOT EXISTS (
             SELECT 1 FROM bot_images WHERE bot_id = $1 AND asset = 'character_sheet' AND character_index = 1))
-          OR NOT EXISTS (SELECT 1 FROM bot_images WHERE bot_id = $1 AND asset = 'channel_avatar')
-          OR NOT EXISTS (SELECT 1 FROM bot_images WHERE bot_id = $1 AND asset = 'channel_banner')
-        )`,
-    [botId, second],
-  );
+          OR (SELECT count(DISTINCT asset) FROM bot_images WHERE bot_id = $1 AND asset = ANY($3::text[])) < 2`,
+      [botId, second, CHANNEL_ASSETS],
+    );
+    if (missing) await queueCharacterRun(pool, botId, null);
+  }
   const saved = await pool.query<BotRow>(`${SELECT_BOTS} WHERE b.id = $1 GROUP BY b.id`, [botId]);
   res.json({ bot: toDto(saved.rows[0]) });
 });
