@@ -48,10 +48,10 @@ const SEEDS = new Map<string, PresetSeed>([
     }],
   }],
   ['retro-cartoon', {
-    style: 'A 1930s rubber-hose cartoon on grainy black-and-white film.',
+    style: 'A 1930s-40s rubber-hose cartoon in full vintage Technicolor: warm, saturated retro colours (tomato red, mustard yellow, teal, cream) with soft film grain and hand-painted backgrounds. Never black and white.',
     imageQuery: 'vintage cartoon',
     characters: [{
-      look: 'A 1930s rubber-hose cartoon character with pie-cut eyes and white gloves, on grainy black-and-white film.',
+      look: 'A 1930s rubber-hose cartoon character with pie-cut eyes and white gloves, in warm vintage Technicolor colours.',
       personality: 'Cheerful, bouncy and endlessly optimistic.',
       voice: 'An old-time newsreel announcer.',
     }],
