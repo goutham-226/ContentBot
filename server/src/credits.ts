@@ -9,7 +9,7 @@ export const PRICES = {
   frame: 15,
   sceneVoice: 10, // per scene; split between characters for duos
   clip: 125,
-  premiumClip: 800, // one 30 s Seedance 2.5 clip at 720p (costs us ~$6.94)
+  premiumClip: 800, // one 30 s Seedance 2.5 clip at 480p (costs us ~$3.08)
 };
 export const PRODUCTION_PRICE = PRICES.script + 4 * (PRICES.frame + PRICES.sceneVoice + PRICES.clip);
 // Premium: 2 × 30 s scenes, $16.80 in all.

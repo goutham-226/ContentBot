@@ -324,7 +324,8 @@ export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2,
 // audio in all. Reference videos would quadruple the price per second, and a
 // first frame can't be combined with references, so neither is sent.
 export const PREMIUM_LIMITS = { images: 30, audio: 10, maxAudioSeconds: 30 };
-const PREMIUM_RESOLUTION = '720p';
+// Always Seedance's lowest resolution (the user's choice, to keep costs down).
+const PREMIUM_RESOLUTION = '480p';
 const PREMIUM_TRIES = 2;
 
 // One premium clip. Its prompt labels the references as [Image1]… and [Audio1]…

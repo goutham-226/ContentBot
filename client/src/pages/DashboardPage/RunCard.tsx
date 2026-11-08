@@ -179,7 +179,7 @@ function Approval({ onApprove, onReresearch, premiumEligible }: {
         <label className="premium-toggle">
           <input type="checkbox" checked={premium} disabled={busy !== null} onChange={(e) => setPremium(e.target.checked)} />
           <span>
-            <strong>Premium</strong> · Seedance 2.5, 2 × 30 s at 720p · $16.80 instead of $7.00
+            <strong>Premium</strong> · Seedance 2.5, 2 × 30 s at 480p · $16.80 instead of $7.00
             <small>For non-human characters only (animals, cartoons, robots…)</small>
           </span>
         </label>
