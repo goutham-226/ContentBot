@@ -8,20 +8,21 @@ const POLL_MS = 2000;
 const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 export const MODELS = {
-  llm: process.env.REPLICATE_LLM_MODEL ?? 'deepseek-ai/deepseek-v3.1',
+  llm: process.env.REPLICATE_LLM_MODEL ?? 'qwen/qwen3-7-plus',
   // FLUX.2 [klein] 4B: ~$0.001 per megapixel, with up to 5 reference images.
   image: process.env.REPLICATE_IMAGE_MODEL ?? 'black-forest-labs/flux-2-klein-4b',
   // Pruna's reference-to-video model (built on MiniMax H3) at 480p in its
   // cheaper "cost" mode: ~$0.015/s, and unlike MiniMax it takes a start frame
   // together with reference images and audio.
   video: process.env.REPLICATE_VIDEO_MODEL ?? 'prunaai/p-video-2-pro-reference',
+  premiumVideo: process.env.REPLICATE_PREMIUM_VIDEO_MODEL ?? 'bytedance/seedance-2.5',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
   // Embeddings run locally: see embeddings.ts.
 };
 
 // Backups, tried in order when a model fails.
 export const BACKUPS = {
-  llm: ['google/gemini-2.5-flash'],
+  llm: ['deepseek-ai/deepseek-v3.1', 'google/gemini-2.5-flash'],
   // Another FLUX, then Pruna (P-Image Edit with references, P-Image without).
   image: ['black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
   // MiniMax H3 Highspeed, only after the main video model has failed
@@ -214,7 +215,7 @@ export async function download(url: string): Promise<{ data: Buffer; contentType
 
 // Gemini names its length limit differently and can "think" first; thinking is
 // off because these prompts are structured extraction and writing, and it
-// keeps runs fast and cheap. Other models (e.g. DeepSeek) take max_tokens.
+// keeps runs fast and cheap. Other models (Qwen, DeepSeek) take max_tokens.
 function textInput(model: string, prompt: string, maxTokens: number): Record<string, unknown> {
   if (model.startsWith('google/gemini')) {
     return { prompt, max_output_tokens: maxTokens, temperature: 0.7, thinking_budget: 0 };
@@ -319,6 +320,40 @@ export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2,
 // place of the previous clip as a reference video, which costs far more.
 // MiniMax can't combine a start frame with references, so it gets the
 // previous clip instead.
+// Seedance 2.5 (premium): up to 30 reference images and 10 audio clips, 30 s of
+// audio in all. Reference videos would quadruple the price per second, and a
+// first frame can't be combined with references, so neither is sent.
+export const PREMIUM_LIMITS = { images: 30, audio: 10, maxAudioSeconds: 30 };
+const PREMIUM_RESOLUTION = '720p';
+const PREMIUM_TRIES = 2;
+
+// One premium clip. Its prompt labels the references as [Image1]… and [Audio1]…
+// in the order given here.
+export async function generatePremiumVideo(
+  prompt: string,
+  references: { images: string[]; audio: string[] },
+  duration: number,
+): Promise<string> {
+  const images = references.images.slice(0, PREMIUM_LIMITS.images);
+  // Seedance needs an image or video reference alongside any reference audio.
+  const audio = images.length > 0 ? references.audio.slice(0, PREMIUM_LIMITS.audio) : [];
+  return withFallback([{ model: MODELS.premiumVideo, tries: PREMIUM_TRIES }], 'rendering the premium clip', async (model) => {
+    const output = await predict(model, {
+      prompt,
+      duration: Math.min(Math.max(duration, 4), 30),
+      resolution: PREMIUM_RESOLUTION,
+      aspect_ratio: '9:16',
+      generate_audio: true,
+      watermark: false,
+      ...(images.length > 0 && { reference_images: images }),
+      ...(audio.length > 0 && { reference_audios: audio }),
+    }, 30 * 60_000);
+    const url = Array.isArray(output) ? output[0] : output;
+    if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
+    return url;
+  });
+}
+
 export async function generateVideo(
   prompt: string,
   references: { images: string[]; audio: string[]; videos: string[]; firstFrame?: string | null },

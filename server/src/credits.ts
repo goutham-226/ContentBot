@@ -9,8 +9,11 @@ export const PRICES = {
   frame: 15,
   sceneVoice: 10, // per scene; split between characters for duos
   clip: 125,
+  premiumClip: 800, // one 30 s Seedance 2.5 clip at 720p (costs us ~$6.94)
 };
 export const PRODUCTION_PRICE = PRICES.script + 4 * (PRICES.frame + PRICES.sceneVoice + PRICES.clip);
+// Premium: 2 × 30 s scenes, $16.80 in all.
+export const PREMIUM_PRODUCTION_PRICE = PRICES.script + 2 * (PRICES.frame + PRICES.sceneVoice + PRICES.premiumClip);
 
 export class OutOfCreditsError extends Error {
   constructor() {

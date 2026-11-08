@@ -110,8 +110,8 @@ export function cancelRun(botId: string, runId: string): Promise<{ run: Run }> {
   return request(`/api/bots/${botId}/runs/${runId}/cancel`, { method: 'POST' });
 }
 
-export function approveResearch(botId: string, runId: string, notes: string): Promise<Started> {
-  return postJson(`/api/bots/${botId}/runs/${runId}/approve`, { notes });
+export function approveResearch(botId: string, runId: string, notes: string, premium = false): Promise<Started> {
+  return postJson(`/api/bots/${botId}/runs/${runId}/approve`, { notes, premium });
 }
 
 export function reresearch(botId: string, runId: string, notes: string): Promise<Started> {

@@ -543,7 +543,8 @@ function Chat({ bot, version }: { bot: Bot; version: number }) {
               <RunCard
                 run={item.run}
                 latest={item.run.id === latestResearchId}
-                onApprove={(notes) => start(() => approveResearch(bot.id, item.run!.id, notes))}
+                onApprove={(notes, premium) => start(() => approveResearch(bot.id, item.run!.id, notes, premium))}
+                premiumEligible={bot.premiumEligible}
                 onReresearch={(notes) => start(() => reresearch(bot.id, item.run!.id, notes))}
                 onCancel={async () => {
                   await cancelRun(bot.id, item.run!.id);

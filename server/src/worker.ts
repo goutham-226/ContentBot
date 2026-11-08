@@ -20,8 +20,8 @@ import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
 import { deleteStaleEmbeddings } from './embeddings.ts';
 import {
-  cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS, uploadFile,
-  VIDEO_LIMITS, withFallback,
+  cancelPrediction, download, generateImage, generatePremiumVideo, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS,
+  PREMIUM_LIMITS, uploadFile, VIDEO_LIMITS, withFallback,
 } from './replicate.ts';
 import { lastFrame, mediaSeconds, stitchClips } from './stitch.ts';
 import { addCaptions } from './captions.ts';
@@ -43,14 +43,59 @@ const MAX_ATTEMPTS = 3;
 const CONCURRENCY = 4;
 const ARTICLES_TO_READ = 4;
 const BOOKS_TO_READ = 3;
-const SCENES = 4;
-const SCENE_SECONDS = 15; // MiniMax H3's maximum clip length
-// Fast short-form narration is ~3 words a second, so a 15 s scene holds about
-// 40 words with no dead air. Fewer leaves silence; more won't fit MiniMax's
-// 15 s of reference audio.
-const WORDS_PER_SCENE = 40;
-const MIN_WORDS_PER_SCENE = 32;
-const MAX_SCENE_AUDIO_SECONDS = SCENE_SECONDS - 1;
+// A one-minute video's shape. Fast short-form narration is ~3 words a second,
+// so a scene's word range fills it with no dead air; its voices must also fit
+// the video model's reference-audio limit.
+const FORMATS = {
+  // 4 × 15 s clips (the standard video model's longest), up to 15 s of voice each.
+  standard: {
+    SCENES: 4, SCENE_SECONDS: 15, MIN_WORDS_PER_SCENE: 32, WORDS_PER_SCENE: 40,
+    MAX_SCENE_AUDIO_SECONDS: 14, AUDIO_LIMIT_SECONDS: VIDEO_LIMITS.maxTotalSeconds, MAX_AUDIO_CLIPS: VIDEO_LIMITS.audio,
+  },
+  // Premium: 2 × 30 s scenes on Seedance 2.5, up to 30 s of voice and 10 clips each.
+  premium: {
+    SCENES: 2, SCENE_SECONDS: 30, MIN_WORDS_PER_SCENE: 66, WORDS_PER_SCENE: 80,
+    MAX_SCENE_AUDIO_SECONDS: 29, AUDIO_LIMIT_SECONDS: PREMIUM_LIMITS.maxAudioSeconds, MAX_AUDIO_CLIPS: PREMIUM_LIMITS.audio,
+  },
+};
+
+// Seedance 2.5 follows structured "production brief" prompts best, so premium
+// scripts plan every scene as a timecoded shot list.
+const PREMIUM_SCRIPT_RULES = (seconds: number) => `This is a premium video rendered by Seedance 2.5, which follows a precise shot list:
+- Each ${seconds}-second scene is one continuous sequence of 6-8 quick shots that follow each fact as it is spoken.
+- Give every shot a timecode range (they cover 0-${seconds}s with no gaps), one camera move (push-in, whip pan, crane up, orbit, POV, macro close-up, snap zoom), what the character physically does, what fills the frame, and the sound effect that hits on it.
+- Every shot shows the fact being said at that moment; never cut to the character standing and talking.
+- Describe appearance through the references only (say "the character"), and keep lighting, palette and style the same in every shot.`;
+
+// A premium clip's prompt as a production brief: format, what each reference
+// is, the timecoded shot list, the exact lines and the sound.
+function premiumBrief(
+  sc: { video: string; frame: string; shots: string[]; sfx: string; lines: { name: string; text: string }[] },
+  index: number,
+  total: number,
+  seconds: number,
+  style: string,
+  imageCount: number,
+  speakers: string[],
+  duo: boolean,
+): string {
+  const legend = [
+    imageCount > 0 && `[Image1] is this scene's storyboard frame: match its location, props and composition.`,
+    imageCount > 1 && `[Image2] shows the character's exact look: keep their face, body, colours and outfit identical in every shot.`,
+    ...speakers.map((name, k) => `[Audio${k + 1}] is ${name}'s voice: use it for ${name}'s lines.`),
+  ].filter(Boolean);
+  const dialogue = sc.lines.map((l) => (duo ? `${l.name}: "${l.text}"` : `"${l.text}"`));
+  return [
+    `FORMAT: vertical 9:16 short-form video, ${seconds} seconds, scene ${index + 1} of ${total}. Fast-paced, high-energy, cinematic; a cut or camera move every 3-5 seconds, no dead air.`,
+    `STYLE: ${style}. Same lighting, palette and look throughout.`,
+    legend.length > 0 && `REFERENCES:\n${legend.join('\n')}`,
+    `SCENE:\n${sc.video || sc.frame}`,
+    sc.shots.length > 0 && `SHOTS:\n${sc.shots.join('\n')}`,
+    dialogue.length > 0 && `DIALOGUE (spoken in this order, word for word, lip-synced, fast and punchy${speakers.length ? ', in the voices from the reference audio' : ''}):\n${dialogue.join('\n')}`,
+    `SOUND: punchy, well-timed sound effects on every action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
+    `RULES: The character moves and interacts with the scene; never just stands talking to camera. No on-screen text, subtitles, logos or watermarks.`,
+  ].filter(Boolean).join('\n\n');
+}
 const FAST = 'Fast-paced, high-energy delivery, like a viral short: quick and punchy, no pauses between sentences.';
 const FASTER = 'Speak even faster, rapid-fire, with no pauses at all.';
 
@@ -84,6 +129,7 @@ type RunRow = {
   surprise: boolean;
   targets: string[] | null; // character runs from "Regenerate"
   attempts: number;
+  premium: boolean; // production runs: Seedance 2.5, 2 × 30 s
 };
 
 type BotContext = {
@@ -235,7 +281,7 @@ async function claimAndRun() {
          ORDER BY r.created_at
          FOR UPDATE OF r SKIP LOCKED
          LIMIT 1)
-      RETURNING id, bot_id, parent_run_id, kind, idea, feedback, surprise, targets, attempts`,
+      RETURNING id, bot_id, parent_run_id, kind, idea, feedback, surprise, targets, attempts, premium`,
   );
   const run = rows[0];
   if (!run) return;
@@ -708,6 +754,9 @@ async function drawCharacter(run: RunRow) {
 }
 
 async function produce(run: RunRow) {
+  const {
+    SCENES, SCENE_SECONDS, MIN_WORDS_PER_SCENE, WORDS_PER_SCENE, MAX_SCENE_AUDIO_SECONDS, AUDIO_LIMIT_SECONDS, MAX_AUDIO_CLIPS,
+  } = run.premium ? FORMATS.premium : FORMATS.standard;
   const bot = await loadBot(run.bot_id);
   const characters = charactersOf(bot);
   const findings = await parentResult<Findings>(run.parent_run_id);
@@ -738,7 +787,7 @@ ${passages.map((h, i) => `<passage id="${i + 1}" source="${h.source}">\n${h.cont
 ${VIRAL_RULES}
 
 ${SHOW_DONT_TELL}
-
+${run.premium ? `\n${PREMIUM_SCRIPT_RULES(SCENE_SECONDS)}\n` : ''}
 Write a script built to go viral, in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds long, told in ${SCENES} scenes of ${SCENE_SECONDS} seconds that flow into each other.
 
 The hook (the first line) decides everything:
@@ -775,7 +824,8 @@ Reply with JSON only:
       "location": "the specific place this scene happens, in a few words (e.g. 'inside a human artery', 'a foggy cursed village at midnight')",
       "example": "the concrete example on screen that proves this scene's point",
       "action": "what the character physically does in the scene (never just standing and talking)",
-      "frame": "an image prompt for this scene's key frame: you mid-action in the location, with the example clearly visible, as described in Look",
+      "frame": "an image prompt for this scene's key frame: you mid-action in the location, with the example clearly visible, as described in Look",${run.premium ? `
+      "shots": [{"time": "0-4s", "camera": "one camera move", "action": "what happens and what the character does", "sfx": "the sound on this shot"}, ...6-8 shots covering 0-${SCENE_SECONDS}s],` : ''}
       "video": "a prompt for this ${SCENE_SECONDS}-second clip: a new visual every 3-4 seconds to match each fact (quick cuts, punch-in zooms, fast camera moves), the character's movement and reactions, the mood; it opens mid-action and ends on a fast camera move (whip pan, zoom in) into the next scene"
     },
     ...exactly ${SCENES} scenes, the first one opening with the strongest hook
@@ -820,6 +870,10 @@ Reply with JSON only:
         video: withStaging(str(sc.video)) && `${withStaging(str(sc.video))}\nThe character is moving and interacting with the scene, not standing still talking to the camera.`,
         bridge: str(sc.bridge),
         sfx: str(sc.sfx),
+        shots: (Array.isArray(sc.shots) ? sc.shots : [])
+          .map((sh: unknown) => (sh && typeof sh === 'object' ? (sh as Record<string, unknown>) : {}))
+          .map((sh) => [str(sh.time), str(sh.camera), str(sh.action), str(sh.sfx) && `SFX: ${str(sh.sfx)}`].filter(Boolean).join(' · '))
+          .filter(Boolean),
       };
     })
     .filter((sc) => sc.video || sc.frame)
@@ -832,7 +886,8 @@ Reply with JSON only:
         sc.video,
         i < all.length - 1 && sc.bridge && `Ends on: ${sc.bridge}`,
         // MiniMax generates the clip's sound; ask for punchy effects under the voice.
-        `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
+        // (Premium briefs carry their own SOUND section.)
+        !run.premium && `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
       ].filter(Boolean).join('\n'),
     }));
   if (scenes.length === 0) throw new Error(`${MODELS.llm} didn’t write any scenes.`);
@@ -899,8 +954,9 @@ Reply with JSON only:
     }))),
   ]);
 
-  // MiniMax takes at most 15 s of reference audio per clip, so a scene that runs
-  // long is re-recorded once at a faster pace (no extra charge).
+  // The video model takes limited reference audio per clip (15 s, or 30 s for
+  // premium), so a scene that runs long is re-recorded once at a faster pace
+  // (no extra charge).
   const sceneSeconds = (s: number) => voiceJobs.reduce((sum, j, k) => sum + (j.scene === s ? voices[k]?.seconds ?? 0 : 0), 0);
   await Promise.all(scenes.map(async (_, s) => {
     const before = sceneSeconds(s);
@@ -912,22 +968,25 @@ Reply with JSON only:
     await step(run.id, 'audio', `Scene ${s + 1} now runs ${sceneSeconds(s).toFixed(1)}s`);
   }));
 
-  // The clips that fit MiniMax's limits: 2–15 s each, at most 15 s together.
+  // The clips that fit the video model's limits: at least 2 s each, within
+  // the scene's reference-audio total.
   const sceneAudio = (s: number) => {
     const fit: string[] = [];
     const skipped: string[] = [];
+    const speakers: string[] = []; // whose voice each fitting clip is, in order
     let total = 0;
     voiceJobs.forEach((j, k) => {
       const v = voices[k];
       if (j.scene !== s || !v) return;
-      if (v.seconds >= VIDEO_LIMITS.minClipSeconds && total + v.seconds <= VIDEO_LIMITS.maxTotalSeconds && fit.length < VIDEO_LIMITS.audio) {
+      if (v.seconds >= VIDEO_LIMITS.minClipSeconds && total + v.seconds <= AUDIO_LIMIT_SECONDS && fit.length < MAX_AUDIO_CLIPS) {
         fit.push(v.url);
+        speakers.push(j.character.name);
         total += v.seconds;
       } else {
         skipped.push(`${j.character.name} (${v.seconds.toFixed(1)}s)`);
       }
     });
-    return { fit, skipped };
+    return { fit, skipped, speakers };
   };
 
   // Clips one after another: each takes its frame (plus the opening frame, to
@@ -940,34 +999,38 @@ Reply with JSON only:
   let firstFrame: string | null = null; // data URL of the previous clip's last frame
   for (const [i, sc] of scenes.entries()) {
     const images = [...new Set([frameUrls[i], frameUrls[0]].filter((u): u is string => u !== null))];
-    const { fit: audio, skipped } = sceneAudio(i);
+    const { fit: audio, skipped, speakers } = sceneAudio(i);
     const videos = previousUrl ? [previousUrl] : [];
     await step(
       run.id,
       'video',
       `Rendering clip ${i + 1} of ${scenes.length} (${SCENE_SECONDS}s)`,
       [
-        `Using ${MODELS.video}`,
+        `Using ${run.premium ? MODELS.premiumVideo : MODELS.video}`,
         images.length && `${images.length} reference image${images.length === 1 ? '' : 's'}`,
         audio.length && `${audio.length} voice clip${audio.length === 1 ? '' : 's'}`,
         firstFrame && 'opening on the last frame of the previous clip',
       ].filter(Boolean).join(', ') + '. This usually takes a few minutes.'
-        + (skipped.length ? `\nLeft out of the voice reference (outside the 2–15 s limits): ${skipped.join(', ')}` : ''),
+        + (skipped.length ? `\nLeft out of the voice reference (outside its length limits): ${skipped.join(', ')}` : ''),
     );
     const dialogue = sc.lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.text}”` : `“${l.text}”`)).join('\n');
-    const prompt = dialogue
-      ? `${sc.video || sc.frame}\n\nSpoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`
-      : sc.video || sc.frame;
+    const prompt = run.premium
+      ? premiumBrief(sc, i, scenes.length, SCENE_SECONDS, styleOf(bot), images.length, speakers, characters.length === 2)
+      : dialogue
+        ? `${sc.video || sc.frame}\n\nSpoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`
+        : sc.video || sc.frame;
     // A failed clip leaves the last good one as the next clip's reference.
     await attempt(run.id, `Couldn’t render clip ${i + 1}`, async () => {
-      const clipUrl = await generateVideo(original(prompt), { images, audio, videos, firstFrame }, SCENE_SECONDS);
+      const clipUrl = run.premium
+        ? await generatePremiumVideo(original(prompt), { images, audio }, SCENE_SECONDS)
+        : await generateVideo(original(prompt), { images, audio, videos, firstFrame }, SCENE_SECONDS);
       const clip = await saveMedia(run.id, 'video', `Clip ${i + 1}`, clipUrl);
       clips.push(clip);
-      await charge(bot.user_id, run.id, PRICES.clip, `Clip ${i + 1}`);
+      await charge(bot.user_id, run.id, run.premium ? PRICES.premiumClip : PRICES.clip, `Clip ${i + 1}`);
       const seconds = await mediaSeconds(clip.data).catch(() => Infinity);
       previousUrl = seconds <= VIDEO_LIMITS.maxTotalSeconds ? clipUrl : null;
       // Inline, since uploaded files need a login that some models can't use.
-      firstFrame = i < scenes.length - 1
+      firstFrame = i < scenes.length - 1 && !run.premium
         ? await lastFrame(clip.data).then((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`).catch(() => null)
         : null;
       await step(run.id, 'video', `Clip ${i + 1} ready`);

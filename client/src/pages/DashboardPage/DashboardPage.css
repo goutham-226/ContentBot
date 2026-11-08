@@ -1347,6 +1347,25 @@
   font-weight: 600;
 }
 
+.premium-toggle {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 10px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.premium-toggle input {
+  margin-top: 3px;
+}
+
+.premium-toggle small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
 .run-archived {
   color: var(--muted);
   font-size: 0.8125rem;

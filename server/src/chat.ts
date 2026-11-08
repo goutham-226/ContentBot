@@ -7,7 +7,8 @@ import { pool } from './db.ts';
 import { clearKnowledge } from './knowledge.ts';
 import { healChannelImages } from './identity.ts';
 import { MESSAGE_MAX } from './catalog.ts';
-import { balance, dollars, PRICES, PRODUCTION_PRICE } from './credits.ts';
+import { balance, dollars, PREMIUM_PRODUCTION_PRICE, PRICES, PRODUCTION_PRICE } from './credits.ts';
+import { isPremiumEligible } from './premium.ts';
 import { currentUser, requireAuth } from './session.ts';
 
 export const chatRouter = Router();
@@ -129,7 +130,10 @@ async function isBusy(botId: string): Promise<boolean> {
 async function startRun(
   botId: string,
   body: string,
-  run: { kind: 'research' | 'production'; idea: string; surprise: boolean; feedback: string; parentRunId: string | null },
+  run: {
+    kind: 'research' | 'production'; idea: string; surprise: boolean; feedback: string; parentRunId: string | null;
+    premium?: boolean;
+  },
 ) {
   const client = await pool.connect();
   try {
@@ -139,9 +143,9 @@ async function startRun(
       [botId, body],
     );
     const created = await client.query<{ id: string }>(
-      `INSERT INTO runs (bot_id, message_id, parent_run_id, kind, idea, surprise, feedback)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [botId, msg.rows[0].id, run.parentRunId, run.kind, run.idea, run.surprise, run.feedback],
+      `INSERT INTO runs (bot_id, message_id, parent_run_id, kind, idea, surprise, feedback, premium)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [botId, msg.rows[0].id, run.parentRunId, run.kind, run.idea, run.surprise, run.feedback, run.premium ?? false],
     );
     await client.query('COMMIT');
     return { message: toMessageDto(msg.rows[0]), run: await getRun(botId, created.rows[0].id) };
@@ -215,16 +219,25 @@ async function takeResearch(botId: string, runId: string, res: Response) {
   return rows[0];
 }
 
-// POST /api/bots/:botId/runs/:runId/approve: { notes? } — write the script and make the video.
+// POST /api/bots/:botId/runs/:runId/approve: { notes?, premium? } — write the
+// script and make the video (premium: 2 × 30 s Seedance 2.5 scenes).
 chatRouter.post('/:botId/runs/:runId/approve', async (req, res) => {
   const { botId, runId } = req.params;
   const notes = notesFrom(req.body).slice(0, NOTES_MAX);
-  if (!(await canAfford(res, PRODUCTION_PRICE, 'Making this video'))) return;
+  const premium = req.body?.premium === true;
+  if (premium) {
+    if (!(await ownsBot(botId, res))) return;
+    if (!(await isPremiumEligible(botId))) {
+      res.status(400).json({ error: 'Premium videos are only for bots whose characters aren’t realistic people.' });
+      return;
+    }
+  }
+  if (!(await canAfford(res, premium ? PREMIUM_PRODUCTION_PRICE : PRODUCTION_PRICE, 'Making this video'))) return;
   const research = await takeResearch(botId, runId, res);
   if (!research) return;
   res.status(201).json(
     await startRun(botId, notes ? `Approved. ${notes}` : 'Approved. Go ahead!', {
-      kind: 'production', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId,
+      kind: 'production', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId, premium,
     }),
   );
 });

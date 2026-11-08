@@ -37,6 +37,7 @@ type BotRow = {
   character_approved: boolean;
   voice: string;
   voice2: string;
+  premium_eligible: boolean | null;
   created_at: Date;
   images: {
     id: string;
@@ -87,6 +88,8 @@ function toDto(row: BotRow) {
           });
       return { text: draft, second: draft2, approved: row.character_approved, voices: [row.voice, row.voice2] };
     })(),
+    // Premium (Seedance 2.5) needs non-human characters; null until checked.
+    premiumEligible: row.premium_eligible,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -159,7 +162,7 @@ function parseBotInput(raw: unknown): BotInput | string {
 
 const SELECT_BOTS = `
   SELECT b.id, b.name, b.color, b.niches, b.identity_preset, b.identity_name, b.identity_description,
-         b.character, b.character2, b.character_approved, b.voice, b.voice2, b.created_at,
+         b.character, b.character2, b.character_approved, b.voice, b.voice2, b.premium_eligible, b.created_at,
          COALESCE(
            json_agg(json_build_object(
              'id', i.id, 'name', i.filename, 'source_url', i.source_url, 'creator', i.creator, 'license', i.license,
@@ -343,7 +346,8 @@ botsRouter.put('/:botId/character', async (req, res) => {
   const { rows: before } = UUID_RE.test(botId)
     ? await pool.query<{ character: string; character2: string; character_approved: boolean }>(
         `UPDATE bots b SET character = $1, character2 = $2, character_approved = true,
-                voice = COALESCE($5, b.voice), voice2 = COALESCE($6, b.voice2)
+                voice = COALESCE($5, b.voice), voice2 = COALESCE($6, b.voice2),
+                premium_eligible = CASE WHEN old.character = $1 AND old.character2 = $2 THEN b.premium_eligible END
            FROM (SELECT id, character, character2, character_approved FROM bots WHERE id = $3 FOR UPDATE) old
           WHERE b.id = old.id AND b.user_id = $4
           RETURNING old.character, old.character2, old.character_approved`,
