@@ -55,9 +55,12 @@ function audioSamples(file: string): Promise<Float32Array> {
   });
 }
 
-async function transcribe(file: string): Promise<Word[]> {
+const norm = (w: string) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+// Words heard between `from` and `to` seconds, timed from the video's start.
+async function transcribe(samples: Float32Array, from: number, to: number): Promise<Word[]> {
   const run = await recognizer();
-  const output = await run(await audioSamples(file), {
+  const output = await run(samples.subarray(Math.floor(from * SAMPLE_RATE), Math.floor(to * SAMPLE_RATE)), {
     return_timestamps: 'word',
     chunk_length_s: 30,
     stride_length_s: 5,
@@ -65,21 +68,35 @@ async function transcribe(file: string): Promise<Word[]> {
   type Chunk = { text: string; timestamp: [number, number | null] };
   const chunks: Chunk[] = ((Array.isArray(output) ? output[0] : output) as { chunks?: Chunk[] }).chunks ?? [];
   return chunks
-    .map((c) => ({ text: c.text.trim(), start: c.timestamp[0], end: c.timestamp[1] ?? c.timestamp[0] + 0.3 }))
+    .map((c) => ({ text: c.text.trim(), start: from + c.timestamp[0], end: from + (c.timestamp[1] ?? c.timestamp[0] + 0.3) }))
     .filter((w) => w.text && Number.isFinite(w.start));
 }
 
-// If Whisper hears nothing usable, spread the script's words over each scene.
-function scriptTimings(scenes: string[], sceneSeconds: number): Word[] {
-  return scenes.flatMap((text, i) => {
-    const words = text.split(/\s+/).filter(Boolean);
-    const from = i * sceneSeconds + 0.5;
-    const step = (sceneSeconds - 1.5) / Math.max(words.length, 1);
-    return words.map((w, k) => ({ text: w, start: from + k * step, end: from + (k + 1) * step }));
-  });
+// Whisper can get stuck repeating a sound (laughter or a sound effect heard as
+// "C-c-c-c…" for half a minute). A long run of one word marks that.
+const LOOP_RUN = 6;
+function looped(words: Word[]): boolean {
+  let run = 1;
+  for (let i = 1; i < words.length; i++) {
+    run = norm(words[i].text) === norm(words[i - 1].text) ? run + 1 : 1;
+    if (run >= LOOP_RUN) return true;
+  }
+  return false;
 }
 
-const norm = (w: string) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+// How many of the captioned words are in the script, 0–1.
+const MIN_SCRIPT_SHARE = 0.5;
+function scriptShare(words: Word[], script: string[]): number {
+  const known = new Set(script.map(norm));
+  return words.filter((w) => known.has(norm(w.text))).length / Math.max(words.length, 1);
+}
+
+// When Whisper's words can't be trusted, spread the script's words over the scene.
+function scriptTimings(script: string[], from: number, to: number): Word[] {
+  const start = from + 0.4;
+  const step = Math.max(to - start - 0.6, 1) / Math.max(script.length, 1);
+  return script.map((w, k) => ({ text: w, start: start + k * step, end: start + (k + 1) * step }));
+}
 
 // How alike two words are, 0–1 (1 - edit distance / longer length).
 function similarity(a: string, b: string): number {
@@ -221,10 +238,21 @@ export async function addCaptions(video: Buffer, scenes: string[], sceneSeconds:
     await writeFile(input, video);
     const { width, height, duration } = await videoInfo(input);
 
-    const heard = await transcribe(input);
-    const words = heard.length < 3
-      ? scriptTimings(scenes, sceneSeconds)
-      : correctWithScript(heard, scenes.join(' ').split(/\s+/).filter(Boolean));
+    // Each scene is transcribed on its own, so if Whisper goes wrong it only
+    // affects that scene, which then falls back to the script's timing.
+    // (Transitions overlap the clips, so scenes are spread over the real length.)
+    const samples = await audioSamples(input);
+    const span = scenes.length > 0 ? Math.min(sceneSeconds, duration / scenes.length) : duration;
+    const words: Word[] = [];
+    for (const [i, text] of scenes.entries()) {
+      const script = text.split(/\s+/).filter(Boolean);
+      if (script.length === 0) continue;
+      const from = i * span;
+      const to = i === scenes.length - 1 ? duration : from + span;
+      const heard = await transcribe(samples, from, to);
+      const corrected = heard.length >= 3 && !looped(heard) ? correctWithScript(heard, script) : [];
+      words.push(...(scriptShare(corrected, script) >= MIN_SCRIPT_SHARE ? corrected : scriptTimings(script, from, to)));
+    }
     const captions = group(words.map((w) => ({ ...w, text: clean(w.text) })).filter((w) => w.text));
     if (captions.length === 0) throw new Error('There were no words to caption.');
 

@@ -427,6 +427,10 @@ async function askJson(prompt: string, maxTokens = 2048): Promise<Record<string,
   });
 }
 
+// Only the words to say: stage directions like "(booming laugh)" or "[pause]"
+// would be read aloud and captioned, and *emphasis* marks would be captioned.
+const spokenOnly = (text: string) => text.replace(/\([^)]*\)|\[[^\]]*\]|\*/g, '').replace(/\s+/g, ' ').trim();
+
 const str = (v: unknown, fallback = '') => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
 const strList = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
@@ -850,7 +854,7 @@ Reply with JSON only:
     .map((l: unknown) => (l && typeof l === 'object' ? (l as Record<string, unknown>) : {}))
     .map((l) => {
       const who = characters.find((c) => c.index === (Number(l.speaker) === 2 ? 1 : 0)) ?? characters[0];
-      return { index: who?.index ?? 0, name: who?.name ?? bot.name, text: str(l.text) };
+      return { index: who?.index ?? 0, name: who?.name ?? bot.name, text: spokenOnly(str(l.text)) };
     })
     .filter((l) => l.text);
   const scenes = (Array.isArray(written.scenes) ? written.scenes : [])
