@@ -24,6 +24,7 @@ import {
   VIDEO_LIMITS, withFallback,
 } from './replicate.ts';
 import { mediaSeconds, stitchClips } from './stitch.ts';
+import { addCaptions } from './captions.ts';
 import { charge, OutOfCreditsError, PRICES, refundRun } from './credits.ts';
 import { CanceledError, runContext, throwIfCanceled } from './runContext.ts';
 import type { RunContext } from './runContext.ts';
@@ -907,18 +908,32 @@ Reply with JSON only:
   }
 
   // Stitch into one video; the separate clips are then dropped to save space.
+  let full: Buffer | null = clips.length === 1 ? clips[0].data : null;
   if (clips.length > 1) {
     await step(run.id, 'video', `Stitching ${clips.length} clips into one video`);
-    const stitched = await attempt(run.id, 'Couldn’t stitch the clips (they’re kept separately)', async () => {
-      const full = await stitchClips(clips.map((c) => c.data));
-      await storeMedia(run.id, 'video', `Full video (${clips.length * SCENE_SECONDS}s)`, full, 'video/mp4');
-      await pool.query('DELETE FROM run_media WHERE id = ANY($1)', [clips.map((c) => c.id)]);
-      await step(run.id, 'video', 'Video ready');
-      return 'ok';
+    full = await stitchClips(clips.map((c) => c.data)).catch(async (err: unknown) => {
+      await step(run.id, 'error', 'Couldn’t stitch the clips (they’re kept separately)', err instanceof Error ? err.message : '');
+      return null;
     });
-    if (!stitched) await step(run.id, 'video', `${clips.length} clips ready`);
-  } else if (clips.length === 1) {
-    await step(run.id, 'video', 'Video ready (1 clip)');
+  }
+
+  // TikTok-style captions, keeping a clean copy too.
+  if (full) {
+    const seconds = Math.round(await mediaSeconds(full).catch(() => clips.length * SCENE_SECONDS));
+    await step(run.id, 'video', 'Adding captions', 'Transcribing the voices to time each word');
+    const spoken = scenes.map((sc) => sc.lines.map((l) => l.text).join(' '));
+    const captioned = await addCaptions(full, spoken, SCENE_SECONDS).catch(async (err: unknown) => {
+      await step(run.id, 'error', 'Couldn’t add captions (the video is kept without them)', err instanceof Error ? err.message : '');
+      return null;
+    });
+    if (captioned) await storeMedia(run.id, 'video', `Full video (${seconds}s) · captions`, captioned, 'video/mp4');
+    if (clips.length > 1) {
+      await storeMedia(run.id, 'video', `Full video (${seconds}s)${captioned ? ' · no captions' : ''}`, full, 'video/mp4');
+      await pool.query('DELETE FROM run_media WHERE id = ANY($1)', [clips.map((c) => c.id)]);
+    }
+    await step(run.id, 'video', 'Video ready');
+  } else if (clips.length > 1) {
+    await step(run.id, 'video', `${clips.length} clips ready`);
   }
 
   await finish(run.id, 'done', production);
