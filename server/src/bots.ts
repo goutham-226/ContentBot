@@ -9,6 +9,7 @@ import {
 } from './catalog.ts';
 import { draftCharacters, imageQueryFor } from './character.ts';
 import { findReferenceImages } from './referenceImages.ts';
+import { INSTRUCTIONS_MAX, reviseCharacters } from './revise.ts';
 import { CHANNEL_ASSETS, cancelCharacterRuns, queueCharacterRun } from './identity.ts';
 
 export const botsRouter = Router();
@@ -321,6 +322,46 @@ botsRouter.delete('/:botId', async (req, res) => {
     ? await pool.query('DELETE FROM bots WHERE id = $1 AND user_id = $2', [botId, currentUser(res).id])
     : { rowCount: 0 };
   res.status(rowCount ? 204 : 404).end();
+});
+
+// POST /api/bots/:botId/character/revise: { instructions, text, second? } — the
+// model rewrites the given drafts as instructed and returns them. A draft that
+// isn't approved yet is saved (still unapproved); approved characters change
+// only when the user saves them.
+botsRouter.post('/:botId/character/revise', async (req, res) => {
+  const { botId } = req.params;
+  const instructions = typeof req.body?.instructions === 'string' ? req.body.instructions.trim() : '';
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  const second = typeof req.body?.second === 'string' ? req.body.second.trim() : '';
+  if (!instructions || !text) {
+    res.status(400).json({ error: 'Say what you’d like to change.' });
+    return;
+  }
+  if (instructions.length > INSTRUCTIONS_MAX || text.length > CHARACTER_MAX || second.length > CHARACTER_MAX) {
+    res.status(400).json({ error: 'That’s too long.' });
+    return;
+  }
+  const { rowCount } = UUID_RE.test(botId)
+    ? await pool.query('SELECT 1 FROM bots WHERE id = $1 AND user_id = $2', [botId, currentUser(res).id])
+    : { rowCount: 0 };
+  if (!rowCount) {
+    res.status(404).json({ error: 'Bot not found.' });
+    return;
+  }
+  let revised: { text: string; second: string };
+  try {
+    revised = await reviseCharacters({ text, second }, instructions, CHARACTER_MAX);
+  } catch (err) {
+    console.warn('Character revise failed:', err);
+    res.status(502).json({ error: 'Couldn’t rewrite the character right now. Try again in a moment.' });
+    return;
+  }
+  await pool.query(
+    `UPDATE bots SET character = $2, character2 = $3, premium_eligible = NULL
+      WHERE id = $1 AND NOT character_approved`,
+    [botId, revised.text, revised.second],
+  );
+  res.json(revised);
 });
 
 // PUT /api/bots/:botId/character: { text, second?, voices? } — saves the

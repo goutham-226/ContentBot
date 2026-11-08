@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useBots } from './bots';
 import type { Bot, BotImage, BotMessage, Run } from './bots';
-import { approveResearch, cancelRun, getThread, regenerateIdentity, reresearch, sendIdea } from '../../api';
+import { approveResearch, cancelRun, getThread, regenerateIdentity, reresearch, reviseCharacter, sendIdea } from '../../api';
 import type { IdentityAsset } from '../../api';
 import RunCard from './RunCard';
 import BotAvatar from './BotAvatar';
@@ -226,6 +226,9 @@ function CharacterCard({ bot }: { bot: Bot }) {
   const [voices, setVoices] = useState<[string, string]>(bot.character.voices);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [revising, setRevising] = useState(false);
+  const [revised, setRevised] = useState(false); // shows "Updated" until the next edit
 
   const secondText = hasSecond ? second.trim() : '';
   const changed = text.trim() !== bot.character.text.trim() || secondText !== bot.character.second.trim()
@@ -243,6 +246,24 @@ function CharacterCard({ bot }: { bot: Bot }) {
       setError(err instanceof Error ? err.message : 'Couldn’t save your characters.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function revise() {
+    if (!instructions.trim() || revising) return;
+    setRevising(true);
+    setError('');
+    try {
+      const next = await reviseCharacter(bot.id, instructions.trim(), text, hasSecond ? second : '');
+      setText(next.text);
+      setSecond(next.second);
+      setHasSecond(next.second !== '');
+      setInstructions('');
+      setRevised(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Couldn’t rewrite your character.');
+    } finally {
+      setRevising(false);
     }
   }
 
@@ -283,12 +304,40 @@ function CharacterCard({ bot }: { bot: Bot }) {
           Here’s a first draft. Approve it, or edit anything you’d like first. You can have up to two characters.
         </p>
       )}
+      <div className="character-revise">
+        <textarea
+          className="character-input"
+          value={instructions}
+          onChange={(e) => setInstructions(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              void revise();
+            }
+          }}
+          maxLength={1000}
+          rows={2}
+          disabled={revising}
+          placeholder="Tell the model what to change, e.g. make him a raccoon, give her a deeper voice, add a sidekick"
+          aria-label="What should the model change?"
+        />
+        <button type="button" className="niche-create" disabled={!instructions.trim() || revising} onClick={() => void revise()}>
+          {revising ? 'Rewriting…' : 'Rewrite'}
+        </button>
+      </div>
+      {revised && (
+        <p className="character-hint" role="status">Updated. Check the changes below, then approve when you’re happy.</p>
+      )}
       <textarea
         className="character-input"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setRevised(false);
+        }}
         maxLength={CHARACTER_MAX}
         rows={6}
+        readOnly={revising}
         aria-label="Character 1"
       />
       <VoicePicker
@@ -306,8 +355,12 @@ function CharacterCard({ bot }: { bot: Bot }) {
           <textarea
             className="character-input"
             value={second}
-            onChange={(e) => setSecond(e.target.value)}
+            onChange={(e) => {
+              setSecond(e.target.value);
+              setRevised(false);
+            }}
             maxLength={CHARACTER_MAX}
+            readOnly={revising}
             rows={6}
             placeholder={'Name: …\nLook: …\nPersonality: …\nVoice: …'}
             aria-label="Character 2"
@@ -327,7 +380,7 @@ function CharacterCard({ bot }: { bot: Bot }) {
         {bot.character.approved && (
           <button type="button" className="niche-back" onClick={cancel}>Cancel</button>
         )}
-        <button type="submit" className="niche-create" disabled={!text.trim() || saving}>
+        <button type="submit" className="niche-create" disabled={!text.trim() || saving || revising}>
           {saving ? 'Saving…' : changed ? 'Save & approve' : bot.character.approved ? 'Save' : 'Approve'}
         </button>
       </div>

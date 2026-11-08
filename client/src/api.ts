@@ -72,6 +72,13 @@ export function deleteBot(botId: string): Promise<void> {
   return request<void>(`/api/bots/${botId}`, { method: 'DELETE' });
 }
 
+// The model rewrites the drafts as instructed; nothing is approved.
+export function reviseCharacter(
+  botId: string, instructions: string, text: string, second: string,
+): Promise<{ text: string; second: string }> {
+  return postJson(`/api/bots/${botId}/character/revise`, { instructions, text, second });
+}
+
 export async function saveCharacter(botId: string, text: string, second: string, voices: string[]): Promise<Bot> {
   const { bot } = await request<{ bot: Bot }>(`/api/bots/${botId}/character`, {
     method: 'PUT',

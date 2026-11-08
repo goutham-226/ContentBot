@@ -1844,3 +1844,15 @@ div.channel-banner-fig {
     animation: none;
   }
 }
+
+.character-revise {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.character-revise .character-input {
+  flex: 1;
+  margin: 0;
+}
