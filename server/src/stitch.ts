@@ -25,6 +25,21 @@ export async function mediaSeconds(data: Buffer): Promise<number> {
   }
 }
 
+// The video's last frame as a JPEG, to open the next clip on.
+export async function lastFrame(video: Buffer): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), 'twinfluencer-frame-'));
+  try {
+    const input = join(dir, 'in.mp4');
+    const out = join(dir, 'last.jpg');
+    await writeFile(input, video);
+    // Decode the final quarter second; -update keeps overwriting, leaving the last frame.
+    await run(FFMPEG, ['-y', '-v', 'error', '-sseof', '-0.25', '-i', input, '-update', '1', '-q:v', '2', out]);
+    return await readFile(out);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 // Short-form style cuts between clips: a white flash, a zoom punch, a whip.
 const TRANSITIONS = ['fadewhite', 'zoomin', 'smoothleft'];
 const TRANSITION_SECONDS = 0.3;

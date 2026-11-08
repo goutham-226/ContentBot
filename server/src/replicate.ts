@@ -8,24 +8,29 @@ const POLL_MS = 2000;
 const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 export const MODELS = {
-  llm: process.env.REPLICATE_LLM_MODEL ?? 'google/gemini-2.5-flash',
+  llm: process.env.REPLICATE_LLM_MODEL ?? 'deepseek-ai/deepseek-v3.1',
   // FLUX.2 [klein] 4B: ~$0.001 per megapixel, with up to 5 reference images.
   image: process.env.REPLICATE_IMAGE_MODEL ?? 'black-forest-labs/flux-2-klein-4b',
-  video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-highspeed',
+  // Pruna's reference-to-video model (built on MiniMax H3) at 480p in its
+  // cheaper "cost" mode: ~$0.015/s, and unlike MiniMax it takes a start frame
+  // together with reference images and audio.
+  video: process.env.REPLICATE_VIDEO_MODEL ?? 'prunaai/p-video-2-pro-reference',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
   // Embeddings run locally: see embeddings.ts.
 };
 
 // Backups, tried in order when a model fails.
 export const BACKUPS = {
-  llm: ['deepseek-ai/deepseek-v3.1'],
+  llm: ['google/gemini-2.5-flash'],
   // Another FLUX, then Pruna (P-Image Edit with references, P-Image without).
   image: ['black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
-  // Pruna's reference-to-video model (built on MiniMax H3, same reference
-  // limits), only after MiniMax has failed VIDEO_TRIES times.
-  video: ['prunaai/p-video-2-pro-reference'],
+  // MiniMax H3 Highspeed, only after the main video model has failed
+  // VIDEO_TRIES times.
+  video: ['minimax/h3-highspeed'],
 };
 const VIDEO_TRIES = 2;
+const PRUNA_RESOLUTION = '480p';
+const PRUNA_MODE = 'cost'; // one GPU: slower, cheaper than 'speed'
 
 export class ReplicateError extends Error {}
 
@@ -310,29 +315,37 @@ export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2,
 // Returns the generated video's (temporary) URL. References must be public
 // URLs, so pass Replicate output links straight from the same run. Reference
 // video seconds are billed like output seconds.
+// `firstFrame` (the previous clip's last frame) opens the clip on Pruna, in
+// place of the previous clip as a reference video, which costs far more.
+// MiniMax can't combine a start frame with references, so it gets the
+// previous clip instead.
 export async function generateVideo(
   prompt: string,
-  references: { images: string[]; audio: string[]; videos: string[] },
+  references: { images: string[]; audio: string[]; videos: string[]; firstFrame?: string | null },
   duration: number,
 ): Promise<string> {
-  const visual = references.images.length > 0 || references.videos.length > 0;
-  const images = references.images.slice(0, VIDEO_LIMITS.images);
+  const { firstFrame } = references;
+  const visual = references.images.length > 0 || references.videos.length > 0 || Boolean(firstFrame);
   const videos = references.videos.slice(0, VIDEO_LIMITS.videos);
   const audio = visual ? references.audio.slice(0, VIDEO_LIMITS.audio) : [];
-  // Pruna needs at least one reference image or video.
-  const chain = [
-    { model: MODELS.video, tries: VIDEO_TRIES },
-    ...(visual ? BACKUPS.video.map((model) => ({ model, tries: 1 })) : []),
-  ];
+  // Both models need at least one reference image or video.
+  const chain = visual
+    ? [MODELS.video, ...BACKUPS.video].map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }))
+    : [{ model: MODELS.video, tries: VIDEO_TRIES }];
   return withFallback(chain, 'rendering the clip', async (model) => {
-    const input = model.startsWith('prunaai/')
+    const pruna = model.startsWith('prunaai/');
+    // Pruna counts the start frame as one of its 9 reference images.
+    const images = references.images.slice(0, VIDEO_LIMITS.images - (pruna && firstFrame ? 1 : 0));
+    const input = pruna
       ? {
           prompt,
           duration: Math.min(Math.max(duration, 5), 15),
           aspect_ratio: '9:16',
-          resolution: '768p',
+          resolution: PRUNA_RESOLUTION,
+          mode: PRUNA_MODE,
+          ...(firstFrame && { first_frame_image: firstFrame }),
           ...(images.length > 0 && { image: images }),
-          ...(videos.length > 0 && { video: videos }),
+          ...(!firstFrame && videos.length > 0 && { video: videos }),
           ...(audio.length > 0 && { audio }),
         }
       : {

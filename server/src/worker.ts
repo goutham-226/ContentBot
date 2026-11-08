@@ -23,7 +23,7 @@ import {
   cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS, uploadFile,
   VIDEO_LIMITS, withFallback,
 } from './replicate.ts';
-import { mediaSeconds, stitchClips } from './stitch.ts';
+import { lastFrame, mediaSeconds, stitchClips } from './stitch.ts';
 import { addCaptions } from './captions.ts';
 import { addBannerTitle } from './typeset.ts';
 import { charge, OutOfCreditsError, PRICES, refundRun } from './credits.ts';
@@ -931,10 +931,13 @@ Reply with JSON only:
   };
 
   // Clips one after another: each takes its frame (plus the opening frame, to
-  // keep the character consistent), its voices, the dialogue to speak, and the
-  // previous clip (when it's within MiniMax's 15 s of reference video).
+  // keep the character consistent), its voices and the dialogue to speak, and
+  // opens on the previous clip's last frame. (The backup model, which can't
+  // take a start frame with references, gets the previous clip instead, when
+  // it's within the 15 s reference-video limit.)
   const clips: { data: Buffer; id: string }[] = [];
   let previousUrl: string | null = null;
+  let firstFrame: string | null = null; // data URL of the previous clip's last frame
   for (const [i, sc] of scenes.entries()) {
     const images = [...new Set([frameUrls[i], frameUrls[0]].filter((u): u is string => u !== null))];
     const { fit: audio, skipped } = sceneAudio(i);
@@ -947,9 +950,9 @@ Reply with JSON only:
         `Using ${MODELS.video}`,
         images.length && `${images.length} reference image${images.length === 1 ? '' : 's'}`,
         audio.length && `${audio.length} voice clip${audio.length === 1 ? '' : 's'}`,
-        videos.length && 'the previous clip',
+        firstFrame && 'opening on the last frame of the previous clip',
       ].filter(Boolean).join(', ') + '. This usually takes a few minutes.'
-        + (skipped.length ? `\nLeft out of the voice reference (outside MiniMax’s 2–15 s limits): ${skipped.join(', ')}` : ''),
+        + (skipped.length ? `\nLeft out of the voice reference (outside the 2–15 s limits): ${skipped.join(', ')}` : ''),
     );
     const dialogue = sc.lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.text}”` : `“${l.text}”`)).join('\n');
     const prompt = dialogue
@@ -957,18 +960,17 @@ Reply with JSON only:
       : sc.video || sc.frame;
     // A failed clip leaves the last good one as the next clip's reference.
     await attempt(run.id, `Couldn’t render clip ${i + 1}`, async () => {
-      const clipUrl = await generateVideo(original(prompt), { images, audio, videos }, SCENE_SECONDS);
+      const clipUrl = await generateVideo(original(prompt), { images, audio, videos, firstFrame }, SCENE_SECONDS);
       const clip = await saveMedia(run.id, 'video', `Clip ${i + 1}`, clipUrl);
       clips.push(clip);
       await charge(bot.user_id, run.id, PRICES.clip, `Clip ${i + 1}`);
       const seconds = await mediaSeconds(clip.data).catch(() => Infinity);
       previousUrl = seconds <= VIDEO_LIMITS.maxTotalSeconds ? clipUrl : null;
-      await step(
-        run.id,
-        'video',
-        `Clip ${i + 1} ready`,
-        previousUrl || i === scenes.length - 1 ? '' : `It runs ${seconds.toFixed(2)}s, over MiniMax’s 15 s reference limit, so the next clip goes without it.`,
-      );
+      // Inline, since uploaded files need a login that some models can't use.
+      firstFrame = i < scenes.length - 1
+        ? await lastFrame(clip.data).then((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`).catch(() => null)
+        : null;
+      await step(run.id, 'video', `Clip ${i + 1} ready`);
       return clipUrl;
     });
   }
