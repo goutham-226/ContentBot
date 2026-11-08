@@ -6,6 +6,7 @@ import { chatRouter } from './chat.ts';
 import { voicesRouter } from './voices.ts';
 import { migrate } from './migrate.ts';
 import { startWorker, stopWorker } from './worker.ts';
+import { warmUpEmbeddings } from './embeddings.ts';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -23,6 +24,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 await migrate();
 startWorker();
+warmUpEmbeddings();
 
 const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);

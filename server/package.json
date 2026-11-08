@@ -10,6 +10,7 @@
     "credits": "tsx --env-file=../.env src/scripts/credits.ts"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.3.1",
     "express": "^5.3.0",
     "multer": "^2.5.0",
     "pg": "^8.23.1"

@@ -13,8 +13,7 @@ export const MODELS = {
   image: process.env.REPLICATE_IMAGE_MODEL ?? 'black-forest-labs/flux-2-klein-4b',
   video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-highspeed',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
-  // 768-dimension vectors; knowledge_chunks.embedding must match.
-  embedding: 'replicate/all-mpnet-base-v2',
+  // Embeddings run locally: see embeddings.ts.
 };
 
 // Backups, tried in order when a model fails.
@@ -27,8 +26,6 @@ export const BACKUPS = {
   video: ['prunaai/p-video-2-pro-reference'],
 };
 const VIDEO_TRIES = 2;
-
-const EMBED_BATCH = 32;
 
 export class ReplicateError extends Error {}
 
@@ -120,7 +117,7 @@ function createSlot(): Promise<void> {
   return createQueue;
 }
 
-// Official models run by name; community models (like the embedding model)
+// Official models run by name; community models
 // need a version id, looked up once and cached.
 const versions = new Map<string, string>();
 
@@ -352,22 +349,4 @@ export async function generateVideo(
     if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
     return url;
   });
-}
-
-export async function embed(texts: string[]): Promise<number[][]> {
-  const vectors: number[][] = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH) {
-    const output = await predict(
-      MODELS.embedding,
-      { text_batch: JSON.stringify(texts.slice(i, i + EMBED_BATCH)) },
-      3 * 60_000,
-    );
-    if (!Array.isArray(output)) throw new ReplicateError('The embedding model returned nothing.');
-    for (const item of output) {
-      const v: unknown = item && typeof item === 'object' && 'embedding' in item ? item.embedding : null;
-      if (!Array.isArray(v)) throw new ReplicateError('The embedding model returned an unexpected result.');
-      vectors.push(v.map(Number));
-    }
-  }
-  return vectors;
 }

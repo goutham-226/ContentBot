@@ -1,6 +1,6 @@
 // A research run's temporary knowledge base, stored in Postgres with pgvector.
 import { pool } from './db.ts';
-import { embed } from './replicate.ts';
+import { embed, toVector } from './embeddings.ts';
 
 const CHUNK_CHARS = 1200;
 const CHUNK_OVERLAP = 150;
@@ -27,8 +27,6 @@ function chunk(text: string): string[] {
   return chunks;
 }
 
-const toVector = (v: number[]) => `[${v.join(',')}]`;
-
 // Returns how many chunks were stored.
 export async function storeKnowledge(runId: string, docs: KnowledgeDoc[]): Promise<number> {
   const rows = docs.flatMap((doc) => chunk(doc.text).map((content) => ({ ...doc, content })));
@@ -46,7 +44,7 @@ export async function storeKnowledge(runId: string, docs: KnowledgeDoc[]): Promi
 // The chunks closest to any of the queries (cosine distance), without repeats.
 export async function searchKnowledge(runId: string, queries: string[], perQuery: number): Promise<KnowledgeHit[]> {
   if (queries.length === 0) return [];
-  const vectors = await embed(queries);
+  const vectors = await embed(queries, 'query');
   const seen = new Set<string>();
   const hits: KnowledgeHit[] = [];
   for (const v of vectors) {

@@ -18,6 +18,7 @@ import { findBookSummaries } from './books.ts';
 import { ORIGINALITY_RULE, styleFor } from './character.ts';
 import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
+import { deleteStaleEmbeddings } from './embeddings.ts';
 import {
   cancelPrediction, download, generateImage, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS, uploadFile,
   VIDEO_LIMITS, withFallback,
@@ -145,7 +146,7 @@ export function startWorker() {
   }, TICK_MS));
 
   timers.push(setInterval(() => {
-    Promise.all([deleteExpiredKnowledge(), pruneColdRuns()])
+    Promise.all([deleteExpiredKnowledge(), deleteStaleEmbeddings(), pruneColdRuns()])
       .catch((err: unknown) => console.error('Cleanup failed:', err));
   }, CLEANUP_EVERY_MS));
 }
