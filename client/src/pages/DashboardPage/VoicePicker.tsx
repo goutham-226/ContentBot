@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { VOICES } from './voices';
 
-// Pick one of the preset voices, with a sample to listen to. The first listen
-// to a voice records its sample, so it can take a few seconds.
+// Pick one of the preset voices, with a sample to listen to. Samples are
+// static files (client/public/voices), recorded once, so listening is free.
 export default function VoicePicker({ legend, name, value, onChange }: {
   legend: string;
   name: string; // radio group name, unique on the page
@@ -23,7 +23,7 @@ export default function VoicePicker({ legend, name, value, onChange }: {
       setLoading(null);
       return;
     }
-    const audio = new Audio(`/api/voices/${id}/preview`);
+    const audio = new Audio(`/voices/${id}.m4a`);
     audioRef.current = audio;
     setError('');
     setPlaying(null);
@@ -36,7 +36,7 @@ export default function VoicePicker({ legend, name, value, onChange }: {
     audio.onerror = () => {
       setLoading(null);
       setPlaying(null);
-      setError('Couldn’t load that sample. Try again in a moment.');
+      setError('Couldn’t play that sample.');
     };
     audio.play().catch(() => {});
   }

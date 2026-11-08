@@ -33,7 +33,8 @@ export const BOT_COLORS = new Set(['blue', 'purple', 'pink', 'red', 'orange', 'y
 export const BOT_NAME_MAX = 40;
 export const MESSAGE_MAX = 4000;
 
-// Qwen3-TTS preset speakers. Keep in sync with client/src/pages/DashboardPage/voices.ts
+// Qwen3-TTS preset speakers. Keep in sync with client/src/pages/DashboardPage/voices.ts,
+// the samples in client/public/voices,
 // and the bots_voice_check constraint (db/migrations/010_voices.sql).
 export const VOICES = new Map([
   ['Ryan', 'Dynamic male voice with strong rhythmic drive'],
