@@ -45,10 +45,14 @@ const ARTICLES_TO_READ = 4;
 const BOOKS_TO_READ = 3;
 const SCENES = 4;
 const SCENE_SECONDS = 15; // MiniMax H3's maximum clip length
-const WORDS_PER_SCENE = 30; // ~2.5 spoken words a second, with room for pauses
-// Leave a little air so each scene's voices fit MiniMax's 15 s of reference audio.
+// Fast short-form narration is ~3 words a second, so a 15 s scene holds about
+// 40 words with no dead air. Fewer leaves silence; more won't fit MiniMax's
+// 15 s of reference audio.
+const WORDS_PER_SCENE = 40;
+const MIN_WORDS_PER_SCENE = 32;
 const MAX_SCENE_AUDIO_SECONDS = SCENE_SECONDS - 1;
-const FASTER = 'Speak quickly, with tight, snappy pacing and no long pauses.';
+const FAST = 'Fast-paced, high-energy delivery, like a viral short: quick and punchy, no pauses between sentences.';
+const FASTER = 'Speak even faster, rapid-fire, with no pauses at all.';
 
 // What makes short-form videos travel. Used when picking topics and writing scripts.
 const VIRAL_RULES = `What makes a short go viral:
@@ -534,7 +538,7 @@ What made these perform well, and what is worth using? Reply with JSON only:
 function voiceStyle(character: string): string {
   const voice = character.match(/^Voice:\s*(.+)$/im)?.[1];
   const personality = character.match(/^Personality:\s*(.+)$/im)?.[1];
-  return [voice, personality, 'Energetic and punchy, like a viral short.'].filter(Boolean).join(' ');
+  return [voice, personality, FAST].filter(Boolean).join(' ');
 }
 
 // The bot's character images, uploaded so the image model can match them: the
@@ -718,7 +722,7 @@ async function produce(run: RunRow) {
   await step(run.id, 'think', `Using ${passages.length} passages`, [...new Set(passages.map((h) => h.source))].join('\n'));
 
   await step(run.id, 'write', 'Writing the script');
-  const written = await askJson(`${persona(bot)}
+  const scriptPrompt = `${persona(bot)}
 
 Topic: ${findings.topic}
 ${run.idea && !run.surprise ? `The user's idea: """${run.idea}"""\n` : ''}${run.feedback ? `The user's notes on the research: """${run.feedback}"""\n` : ''}
@@ -736,33 +740,60 @@ ${VIRAL_RULES}
 ${SHOW_DONT_TELL}
 
 Write a script built to go viral, in your character's voice. The video is ${SCENES * SCENE_SECONDS} seconds long, told in ${SCENES} scenes of ${SCENE_SECONDS} seconds that flow into each other.
-Make it punchy:
-- Scene 1 opens with the hook in the first 2 seconds: a bold claim, a shocking fact or a question. No intros, no "hey guys", no "in this video".
-- Short spoken sentences, mostly under 10 words. Every line either reveals something or raises the stakes. Cut filler.
-- Keep an open loop running: tease the payoff early and pay it off in scene ${SCENES}.
-- Each scene ends on a beat that pulls into the next (a twist, a "but", a cliffhanger).
-- End with a punchline or a mind-blown final fact that makes people rewatch or comment. No "like and subscribe".
-- Stick to facts from the research; never invent statistics.
-- Each scene is built around one concrete example from the research.
-- Keep each scene's spoken lines to at most ${WORDS_PER_SCENE} words in total so they fit ${SCENE_SECONDS} seconds.
+
+The hook (the first line) decides everything:
+- First brainstorm 5 different hooks, then open with the strongest one.
+- It lands in under 2 seconds (under 12 words) and is the most shocking, specific fact in the research, a number or a claim that sounds impossible but is true.
+- Strong patterns: "This [ordinary thing] can [shocking result].", "[Number] [people/things] [did something unbelievable].", "Everything you know about [X] is wrong.", "[Thing] was banned/hidden/erased for [reason]."
+- Never open with a greeting, the topic name, a definition, "did you know", "imagine", "in this video" or a slow question.
+
+Then facts, non-stop, for the whole minute:
+- A new fact, number, name or twist every 3-4 seconds: about 4 facts per scene, 15+ in the video, each one more surprising than the last.
+- Fast pace: short sentences, mostly 5-9 words. No filler, no setup, no recaps, no "let's", "so", "basically", "you see", "now here's the thing".
+- Every scene's lines fill its whole ${SCENE_SECONDS} seconds: between ${MIN_WORDS_PER_SCENE} and ${WORDS_PER_SCENE} words per scene. No dead air.
+- Each scene ends on a cliffhanger that makes the next fact feel urgent ("But that's not the worst part.").
+
+The scenes are one chain, never a list of separate facts:
+- Plan the chain first: each scene's facts are the cause, consequence or answer of the scene before (A, so B, which led to C, which is why D).
+- A scene's first line answers or picks up the exact question its previous scene ended on, using a linking word or the same subject ("And those fleas…", "That's why…", "Which meant…"). Never jump to an unconnected fact or start fresh.
+- The camera follows the same thread: each scene ends on an object, place or motion that the next scene opens on (a match cut, e.g. zooming into the flea's mouth → opening inside the bloodstream).
+- Keep one open loop running from the hook and pay it off with the single craziest fact at the very end. No "like and subscribe", no outro.
+- Only facts from the research; never invent statistics or names.
 Reply with JSON only:
 {
+  "chain": "one sentence: how the ${SCENES} scenes link, cause to effect (A → B → C → D)",
   "title": "a curiosity-driven title under 60 characters",
   "summary": "2 sentences on what the video covers and why it will perform",
+  "hooks": ["5 candidate opening lines, each under 12 words"],
   "ideas": [{"title": "...", "hook": "a scroll-stopping first line"}, 3 alternative angles, best first],
   "script": "the full ${SCENES * SCENE_SECONDS}-second vertical-video script, with [scene] notes in brackets${characters.length === 2 ? ' and both characters speaking (label each line with their name)' : ''}",
   "scenes": [
     {
-      "voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line"}, ...at most ${WORDS_PER_SCENE} words in total for this scene, no stage directions${characters.length === 2 ? ', a back-and-forth between both characters' : ''}],
+      "voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line"}, ...${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words in total for this scene, no stage directions${characters.length === 2 ? ', a back-and-forth between both characters' : ''}],
+      "bridge": "how this scene hands over to the next one: the question it leaves AND the shot it ends on that the next scene opens on (empty for the last scene)",
       "location": "the specific place this scene happens, in a few words (e.g. 'inside a human artery', 'a foggy cursed village at midnight')",
       "example": "the concrete example on screen that proves this scene's point",
       "action": "what the character physically does in the scene (never just standing and talking)",
       "frame": "an image prompt for this scene's key frame: you mid-action in the location, with the example clearly visible, as described in Look",
-      "video": "a prompt for this ${SCENE_SECONDS}-second clip: what happens on screen beat by beat, the character's movement and reactions, the camera movement and the mood; continuing smoothly from the previous scene"
+      "video": "a prompt for this ${SCENE_SECONDS}-second clip: a new visual every 3-4 seconds to match each fact (quick cuts, punch-in zooms, fast camera moves), the character's movement and reactions, the mood; it opens mid-action and ends on a fast camera move (whip pan, zoom in) into the next scene"
     },
-    ...exactly ${SCENES} scenes, the first one opening with the hook
+    ...exactly ${SCENES} scenes, the first one opening with the strongest hook
   ]
-}`, 6000);
+}`;
+  // Short scenes leave dead air, so a script that runs short is sent back once.
+  const sceneWords = (draft: Record<string, unknown>) => (Array.isArray(draft.scenes) ? draft.scenes : [])
+    .map((sc: unknown) => {
+      const lines = sc && typeof sc === 'object' && Array.isArray((sc as Record<string, unknown>).voiceLines)
+        ? (sc as { voiceLines: unknown[] }).voiceLines : [];
+      return lines.map((l) => (l && typeof l === 'object' ? str((l as Record<string, unknown>).text) : ''))
+        .join(' ').split(/\s+/).filter(Boolean).length;
+    });
+  let written = await askJson(scriptPrompt, 6000);
+  const counts = sceneWords(written);
+  if (counts.length < SCENES || counts.some((n) => n < MIN_WORDS_PER_SCENE * 0.85)) {
+    await step(run.id, 'write', 'Tightening the script', `Scenes ran ${counts.join(', ')} words; each needs ${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} to fill ${SCENE_SECONDS} seconds.`);
+    written = await askJson(`${scriptPrompt}\n\nYour last draft had scenes of ${counts.join(', ')} words, which leaves dead air. Write exactly ${SCENES} scenes of ${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words each, packed with facts.`, 6000);
+  }
 
   const toLines = (raw: unknown) => (Array.isArray(raw) ? raw : [])
     .map((l: unknown) => (l && typeof l === 'object' ? (l as Record<string, unknown>) : {}))
@@ -786,10 +817,20 @@ Reply with JSON only:
         lines: toLines(sc.voiceLines),
         frame: withStaging(str(sc.frame)),
         video: withStaging(str(sc.video)) && `${withStaging(str(sc.video))}\nThe character is moving and interacting with the scene, not standing still talking to the camera.`,
+        bridge: str(sc.bridge),
       };
     })
     .filter((sc) => sc.video || sc.frame)
-    .slice(0, SCENES);
+    .slice(0, SCENES)
+    // Match cuts: each clip ends on the shot the next one opens on.
+    .map((sc, i, all) => ({
+      ...sc,
+      video: [
+        i > 0 && all[i - 1].bridge && `Opens exactly where the previous clip ended: ${all[i - 1].bridge}`,
+        sc.video,
+        i < all.length - 1 && sc.bridge && `Ends on: ${sc.bridge}`,
+      ].filter(Boolean).join('\n'),
+    }));
   if (scenes.length === 0) throw new Error(`${MODELS.llm} didn’t write any scenes.`);
 
   const production: Production = {
