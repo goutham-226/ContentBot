@@ -20,7 +20,7 @@ import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
 import { deleteStaleEmbeddings } from './embeddings.ts';
 import {
-  cancelPrediction, download, generateImage, generatePremiumVideo, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS,
+  BACKUPS, cancelPrediction, download, generateImage, generatePremiumVideo, generateSpeech, generateText, generateVideo, LLM_CHAIN, MODELS,
   PREMIUM_LIMITS, uploadFile, VIDEO_LIMITS, withFallback,
 } from './replicate.ts';
 import { lastFrame, mediaSeconds, stitchClips } from './stitch.ts';
@@ -1001,10 +1001,87 @@ Reply with JSON only:
   const clips: { data: Buffer; id: string }[] = [];
   let previousUrl: string | null = null;
   let firstFrame: string | null = null; // data URL of the previous clip's last frame
+
+  // Renders one clip with the standard models (or the given ones), keeping it
+  // as the next clip's reference.
+  const renderClip = async (
+    label: string, prompt: string, images: string[], audio: string[], seconds: number, models?: string[],
+  ) => {
+    const clipUrl = await generateVideo(
+      original(prompt), { images, audio, videos: previousUrl ? [previousUrl] : [], firstFrame }, seconds, models,
+    );
+    await keepClip(label, clipUrl, PRICES.clip);
+    return clipUrl;
+  };
+  const keepClip = async (label: string, clipUrl: string, price: number) => {
+    const clip = await saveMedia(run.id, 'video', label, clipUrl);
+    clips.push(clip);
+    await charge(bot.user_id, run.id, price, label);
+    const seconds = await mediaSeconds(clip.data).catch(() => Infinity);
+    previousUrl = seconds <= VIDEO_LIMITS.maxTotalSeconds ? clipUrl : null;
+    // Inline, since uploaded files need a login that some models can't use.
+    firstFrame = await lastFrame(clip.data).then((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`).catch(() => null);
+    await step(run.id, 'video', `${label} ready`);
+  };
+
+  // Premium scenes whose Seedance render failed are made as two 15 s halves
+  // with MiniMax, then Pruna. Each half's lines are re-voiced so they fit
+  // those models' 15 s of reference audio.
+  const FALLBACK_SECONDS = 15;
+  const fallbackScene = async (i: number, sc: (typeof scenes)[number], images: string[]) => {
+    const sentences = sc.lines.flatMap((l) => (l.text.match(/[^.!?]+[.!?]*/g) ?? [l.text])
+      .map((t) => ({ ...l, text: t.trim() })).filter((t) => t.text));
+    const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
+    const total = sentences.reduce((n, t) => n + words(t.text), 0);
+    let split = 0;
+    for (let n = 0; split < sentences.length - 1 && n + words(sentences[split].text) <= total / 2; split++) n += words(sentences[split].text);
+    const halves = [sentences.slice(0, Math.max(split, 1)), sentences.slice(Math.max(split, 1))];
+    const shotStart = (shot: string) => Number(/^(\d+)/.exec(shot)?.[1] ?? 0);
+    for (const [h, lines] of halves.entries()) {
+      const label = `Clip ${i + 1}, part ${h + 1}`;
+      await step(run.id, 'video', `Rendering ${label.toLowerCase()} (${FALLBACK_SECONDS}s)`, `Using ${BACKUPS.premiumVideo.join(', then ')}.`);
+      await attempt(run.id, `Couldn’t render ${label.toLowerCase()}`, async () => {
+        // This half's voices, re-recorded faster once if they run long.
+        const audio: string[] = [];
+        let used = 0;
+        for (const c of characters) {
+          const text = lines.filter((l) => l.index === c.index).map((l) => l.text).join(' ');
+          if (!text) continue;
+          const say = async (faster: boolean) => {
+            const url = await generateSpeech(text, c.speaker, [voiceStyle(c.text), faster && FASTER].filter(Boolean).join(' '));
+            const saved = await saveMedia(run.id, 'audio', `Scene ${i + 1}, part ${h + 1} — ${c.name}`, url);
+            return { url, seconds: await mediaSeconds(saved.data).catch(() => Infinity) };
+          };
+          let voice = await say(false);
+          if (voice.seconds > FALLBACK_SECONDS - 1) voice = await say(true);
+          if (voice.seconds >= VIDEO_LIMITS.minClipSeconds && used + voice.seconds <= VIDEO_LIMITS.maxTotalSeconds
+            && audio.length < VIDEO_LIMITS.audio) {
+            audio.push(voice.url);
+            used += voice.seconds;
+          }
+        }
+        const half = sc.shots.filter((shot) => (shotStart(shot) < FALLBACK_SECONDS) === (h === 0));
+        const dialogue = lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.text}”` : `“${l.text}”`)).join('\n');
+        const prompt = [
+          sc.video || sc.frame,
+          `This is part ${h + 1} of 2 of this scene.`,
+          half.length > 0 && `Shots:\n${half.join('\n')}`,
+          `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
+          dialogue && `Spoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`,
+        ].filter(Boolean).join('\n\n');
+        return renderClip(label, prompt, images, audio, FALLBACK_SECONDS, BACKUPS.premiumVideo);
+      });
+    }
+  };
+
+  let seedanceFailed = false; // once it fails, the rest of the video uses the fallback
   for (const [i, sc] of scenes.entries()) {
     const images = [...new Set([frameUrls[i], frameUrls[0]].filter((u): u is string => u !== null))];
+    if (run.premium && seedanceFailed) {
+      await fallbackScene(i, sc, images);
+      continue;
+    }
     const { fit: audio, skipped, speakers } = sceneAudio(i);
-    const videos = previousUrl ? [previousUrl] : [];
     await step(
       run.id,
       'video',
@@ -1013,33 +1090,30 @@ Reply with JSON only:
         `Using ${run.premium ? MODELS.premiumVideo : MODELS.video}`,
         images.length && `${images.length} reference image${images.length === 1 ? '' : 's'}`,
         audio.length && `${audio.length} voice clip${audio.length === 1 ? '' : 's'}`,
-        firstFrame && 'opening on the last frame of the previous clip',
+        !run.premium && firstFrame && 'opening on the last frame of the previous clip',
       ].filter(Boolean).join(', ') + '. This usually takes a few minutes.'
         + (skipped.length ? `\nLeft out of the voice reference (outside its length limits): ${skipped.join(', ')}` : ''),
     );
     const dialogue = sc.lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.text}”` : `“${l.text}”`)).join('\n');
-    const prompt = run.premium
-      ? premiumBrief(sc, i, scenes.length, SCENE_SECONDS, styleOf(bot), images.length, speakers, characters.length === 2)
-      : dialogue
-        ? `${sc.video || sc.frame}\n\nSpoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`
-        : sc.video || sc.frame;
     // A failed clip leaves the last good one as the next clip's reference.
-    await attempt(run.id, `Couldn’t render clip ${i + 1}`, async () => {
-      const clipUrl = run.premium
-        ? await generatePremiumVideo(original(prompt), { images, audio }, SCENE_SECONDS)
-        : await generateVideo(original(prompt), { images, audio, videos, firstFrame }, SCENE_SECONDS);
-      const clip = await saveMedia(run.id, 'video', `Clip ${i + 1}`, clipUrl);
-      clips.push(clip);
-      await charge(bot.user_id, run.id, run.premium ? PRICES.premiumClip : PRICES.clip, `Clip ${i + 1}`);
-      const seconds = await mediaSeconds(clip.data).catch(() => Infinity);
-      previousUrl = seconds <= VIDEO_LIMITS.maxTotalSeconds ? clipUrl : null;
-      // Inline, since uploaded files need a login that some models can't use.
-      firstFrame = i < scenes.length - 1 && !run.premium
-        ? await lastFrame(clip.data).then((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`).catch(() => null)
-        : null;
-      await step(run.id, 'video', `Clip ${i + 1} ready`);
-      return clipUrl;
-    });
+    if (run.premium) {
+      const prompt = premiumBrief(sc, i, scenes.length, SCENE_SECONDS, styleOf(bot), images.length, speakers, characters.length === 2);
+      const rendered = await attempt(run.id, `Seedance couldn’t render clip ${i + 1}`, async () => {
+        const clipUrl = await generatePremiumVideo(original(prompt), { images, audio }, SCENE_SECONDS);
+        await keepClip(`Clip ${i + 1}`, clipUrl, PRICES.premiumClip);
+        return clipUrl;
+      });
+      if (!rendered) {
+        seedanceFailed = true;
+        await step(run.id, 'video', `Switching to ${BACKUPS.premiumVideo.join(', then ')} for the rest of the video`);
+        await fallbackScene(i, sc, images);
+      }
+      continue;
+    }
+    const prompt = dialogue
+      ? `${sc.video || sc.frame}\n\nSpoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`
+      : sc.video || sc.frame;
+    await attempt(run.id, `Couldn’t render clip ${i + 1}`, () => renderClip(`Clip ${i + 1}`, prompt, images, audio, SCENE_SECONDS));
   }
 
   // Stitch into one video; the separate clips are then dropped to save space.

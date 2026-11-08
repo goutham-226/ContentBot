@@ -28,6 +28,8 @@ export const BACKUPS = {
   // MiniMax H3 Highspeed, only after the main video model has failed
   // VIDEO_TRIES times.
   video: ['minimax/h3-highspeed'],
+  // When Seedance fails a premium scene: MiniMax, then Pruna, as 15 s halves.
+  premiumVideo: ['minimax/h3-highspeed', MODELS.video],
 };
 const VIDEO_TRIES = 2;
 const PRUNA_RESOLUTION = '480p';
@@ -359,6 +361,7 @@ export async function generateVideo(
   prompt: string,
   references: { images: string[]; audio: string[]; videos: string[]; firstFrame?: string | null },
   duration: number,
+  models: string[] = [MODELS.video, ...BACKUPS.video], // the first gets VIDEO_TRIES tries
 ): Promise<string> {
   const { firstFrame } = references;
   const visual = references.images.length > 0 || references.videos.length > 0 || Boolean(firstFrame);
@@ -366,8 +369,8 @@ export async function generateVideo(
   const audio = visual ? references.audio.slice(0, VIDEO_LIMITS.audio) : [];
   // Both models need at least one reference image or video.
   const chain = visual
-    ? [MODELS.video, ...BACKUPS.video].map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }))
-    : [{ model: MODELS.video, tries: VIDEO_TRIES }];
+    ? models.map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }))
+    : [{ model: models[0], tries: VIDEO_TRIES }];
   return withFallback(chain, 'rendering the clip', async (model) => {
     const pruna = model.startsWith('prunaai/');
     // Pruna counts the start frame as one of its 9 reference images.
