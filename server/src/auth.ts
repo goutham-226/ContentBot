@@ -1,13 +1,14 @@
 import { Router } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { pool } from './db.ts';
 import type { UserRow } from './db.ts';
 import { hashPassword, verifyPassword } from './password.ts';
 import { endSession, getSessionUser, startSession } from './session.ts';
-import { balance } from './credits.ts';
 
 export const authRouter = Router();
 
-const MIN_PASSWORD = 6;
+const MIN_PASSWORD = 8;
+const MAX_PASSWORD = 256; // hashing is deliberately slow, so very long inputs aren't accepted
 const USERNAME_RE = /^[A-Za-z0-9._]{3,30}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVALID_LOGIN = 'Sorry, your username or password was incorrect.';
@@ -25,6 +26,32 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+// Rate limits, so passwords can't be guessed quickly and usernames and emails
+// can't be enumerated in bulk. Per IP (see TRUST_PROXY in index.ts), plus per
+// account for logins, counting only failed attempts so a real user isn't
+// locked out by their own successful logins.
+const MINUTE = 60_000;
+const limiter = (windowMs: number, limit: number, message: string, options: Parameters<typeof rateLimit>[0] = {}) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: message },
+    ...options,
+  });
+const TOO_MANY_LOGINS = 'Too many login attempts. Please wait a few minutes and try again.';
+const loginPerIp = limiter(15 * MINUTE, 30, TOO_MANY_LOGINS);
+const loginPerAccount = limiter(15 * MINUTE, 10, TOO_MANY_LOGINS, {
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const identifier = str(req.body?.identifier).toLowerCase(); // usernames and emails are case-insensitive
+    return identifier ? `login:${identifier}` : ipKeyGenerator(req.ip ?? '');
+  },
+});
+const signupPerIp = limiter(60 * MINUTE, 10, 'Too many sign-ups from here. Please try again later.');
+const availablePerIp = limiter(MINUTE, 60, 'Slow down a little, then try again.');
+
 function validateSignup(username: string, email: string, password: string): FieldErrors {
   const errors: FieldErrors = {};
   if (!USERNAME_RE.test(username)) {
@@ -35,6 +62,8 @@ function validateSignup(username: string, email: string, password: string): Fiel
   }
   if (password.length < MIN_PASSWORD) {
     errors.password = `Use at least ${MIN_PASSWORD} characters.`;
+  } else if (password.length > MAX_PASSWORD) {
+    errors.password = `Use at most ${MAX_PASSWORD} characters.`;
   }
   return errors;
 }
@@ -54,7 +83,7 @@ async function findTaken(username: string, email: string): Promise<FieldErrors> 
 }
 
 // GET /api/auth/available?username=foo  or  ?email=foo@bar.com
-authRouter.get('/available', async (req, res) => {
+authRouter.get('/available', availablePerIp, async (req, res) => {
   const username = str(req.query.username);
   const email = str(req.query.email);
 
@@ -71,7 +100,7 @@ authRouter.get('/available', async (req, res) => {
   res.status(400).json({ error: 'Pass a username or email.' });
 });
 
-authRouter.post('/signup', async (req, res) => {
+authRouter.post('/signup', signupPerIp, async (req, res) => {
   const username = str(req.body?.username);
   const email = str(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -109,11 +138,11 @@ authRouter.post('/signup', async (req, res) => {
   }
 });
 
-authRouter.post('/login', async (req, res) => {
+authRouter.post('/login', loginPerIp, loginPerAccount, async (req, res) => {
   const identifier = str(req.body?.identifier);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
-  if (!identifier || !password) {
+  if (!identifier || !password || password.length > MAX_PASSWORD) {
     res.status(400).json({ error: INVALID_LOGIN });
     return;
   }
@@ -141,7 +170,16 @@ authRouter.get('/me', async (req, res) => {
     res.status(401).json({ error: 'Not logged in.' });
     return;
   }
-  res.json({ user: { username: user.username, email: user.email, creditsCents: await balance(user.id) } });
+  const { rows } = await pool.query<{ credits_cents: number }>(
+    'SELECT credits_cents FROM users WHERE id = $1',
+    [user.id],
+  );
+  res.json({
+    user: {
+      username: user.username, email: user.email,
+      creditsCents: rows[0]?.credits_cents ?? 0,
+    },
+  });
 });
 
 authRouter.post('/logout', async (req, res) => {

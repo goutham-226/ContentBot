@@ -274,7 +274,7 @@ export default function NewBotPanel() {
         <p className="new-bot-sub">
           {imagesRequired
             ? `Your own style needs at least one image so your bot knows what “${identity.name}” looks like: characters, settings or example frames.`
-            : `Optional. Add images of characters, settings or example frames to steer the ${identity.name} style, or skip and we’ll find openly licensed references online.`}
+            : `Optional. Add images of characters, settings or example frames to steer the ${identity.name} style, or skip to use the preset style as is.`}
         </p>
 
         <form className="niche-form" onSubmit={handleSubmit}>

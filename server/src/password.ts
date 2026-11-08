@@ -11,10 +11,25 @@ const KEY_LEN = 64;
 const SALT_LEN = 16;
 const MAX_MEM = 64 * 1024 * 1024;
 
-function derive(password: string, salt: Buffer, opts: ScryptOptions): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    scrypt(password, salt, KEY_LEN, opts, (err, key) => (err ? reject(err) : resolve(key)));
-  });
+// Each hash uses ~32 MB (128 * N * r bytes), so only a few run at once and the
+// rest wait their turn; a burst of logins can't exhaust memory.
+const MAX_CONCURRENT = 4;
+let inFlight = 0;
+const waiting: (() => void)[] = [];
+
+async function derive(password: string, salt: Buffer, opts: ScryptOptions): Promise<Buffer> {
+  if (inFlight >= MAX_CONCURRENT) await new Promise<void>((resolve) => waiting.push(resolve));
+  else inFlight++;
+  try {
+    return await new Promise((resolve, reject) => {
+      scrypt(password, salt, KEY_LEN, opts, (err, key) => (err ? reject(err) : resolve(key)));
+    });
+  } finally {
+    // Hand the slot straight to the next in line, or free it.
+    const next = waiting.shift();
+    if (next) next();
+    else inFlight--;
+  }
 }
 
 export async function hashPassword(password: string): Promise<string> {

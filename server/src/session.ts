@@ -36,7 +36,9 @@ export async function startSession(res: Response, userId: string): Promise<void>
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true, // not readable from page scripts
     sameSite: 'lax', // not sent on cross-site POSTs
-    secure: process.env.NODE_ENV === 'production',
+    // HTTPS only, unless explicitly in development, so a deploy that forgets
+    // NODE_ENV doesn't send sessions over plain HTTP.
+    secure: process.env.NODE_ENV !== 'development',
     path: '/',
     maxAge: SESSION_DAYS * 24 * 60 * 60 * 1000,
   });

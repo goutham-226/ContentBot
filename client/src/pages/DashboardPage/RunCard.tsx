@@ -140,13 +140,11 @@ function FindingsView({ findings }: { findings: Findings }) {
   );
 }
 
-function Approval({ onApprove, onReresearch, premiumEligible }: {
-  onApprove: (notes: string, premium: boolean) => Promise<void>;
+function Approval({ onApprove, onReresearch }: {
+  onApprove: (notes: string) => Promise<void>;
   onReresearch: (notes: string) => Promise<void>;
-  premiumEligible: boolean | null;
 }) {
   const [notes, setNotes] = useState('');
-  const [premium, setPremium] = useState(false);
   const [busy, setBusy] = useState<'approve' | 'reresearch' | null>(null);
   const [error, setError] = useState('');
 
@@ -155,7 +153,7 @@ function Approval({ onApprove, onReresearch, premiumEligible }: {
     setBusy(which);
     setError('');
     try {
-      await (which === 'approve' ? onApprove(notes.trim(), premium) : onReresearch(notes.trim()));
+      await (which === 'approve' ? onApprove(notes.trim()) : onReresearch(notes.trim()));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.');
       setBusy(null);
@@ -174,23 +172,13 @@ function Approval({ onApprove, onReresearch, premiumEligible }: {
         placeholder="Your thoughts (optional): what to focus on, change or avoid"
         aria-label="Your thoughts on the research (optional)"
       />
-      {/* Hidden once the bot is known to have realistic human characters. */}
-      {premiumEligible !== false && (
-        <label className="premium-toggle">
-          <input type="checkbox" checked={premium} disabled={busy !== null} onChange={(e) => setPremium(e.target.checked)} />
-          <span>
-            <strong>Premium</strong> · Seedance 2.5, 2 × 30 s at 480p · $16.80 instead of $7.00
-            <small>For non-human characters only (animals, cartoons, robots…)</small>
-          </span>
-        </label>
-      )}
       {error && <p className="chat-error" role="alert">{error}</p>}
       <div className="character-actions">
         <button type="button" className="niche-back" disabled={busy !== null} onClick={() => act('reresearch')}>
           {busy === 'reresearch' ? 'Starting…' : 'Re-research'}
         </button>
         <button type="submit" className="niche-create" disabled={busy !== null}>
-          {busy === 'approve' ? 'Starting…' : premium ? 'Approve & make premium video' : 'Approve & make video'}
+          {busy === 'approve' ? 'Starting…' : 'Approve & make video'}
         </button>
       </div>
     </form>
@@ -218,13 +206,12 @@ function ProductionView({ production }: { production: Production }) {
   );
 }
 
-export default function RunCard({ run, latest, onApprove, onReresearch, onCancel, premiumEligible }: {
+export default function RunCard({ run, latest, onApprove, onReresearch, onCancel }: {
   run: Run;
   latest: boolean; // only the newest research can be approved
-  onApprove: (notes: string, premium: boolean) => Promise<void>;
+  onApprove: (notes: string) => Promise<void>;
   onReresearch: (notes: string) => Promise<void>;
   onCancel: () => Promise<void>;
-  premiumEligible: boolean | null;
 }) {
   const images = run.media.filter((m) => m.kind === 'image');
   const audio = run.media.filter((m) => m.kind === 'audio');
@@ -281,7 +268,7 @@ export default function RunCard({ run, latest, onApprove, onReresearch, onCancel
         </p>
       )}
       {run.status === 'awaiting_approval' && latest && !run.archived && (
-        <Approval onApprove={onApprove} onReresearch={onReresearch} premiumEligible={premiumEligible} />
+        <Approval onApprove={onApprove} onReresearch={onReresearch} />
       )}
     </li>
   );

@@ -3,12 +3,13 @@
 // with the user's notes.
 import { Router } from 'express';
 import type { Response } from 'express';
+import type { PoolClient } from 'pg';
 import { pool } from './db.ts';
 import { clearKnowledge } from './knowledge.ts';
 import { healChannelImages } from './identity.ts';
 import { MESSAGE_MAX } from './catalog.ts';
-import { balance, dollars, PREMIUM_PRODUCTION_PRICE, PRICES, PRODUCTION_PRICE } from './credits.ts';
-import { isPremiumEligible } from './premium.ts';
+import { dollars, PRICES, PRODUCTION_PRICE, reserve, settleRun } from './credits.ts';
+import { QUOTA_MESSAGE, useDailyQuota } from './quota.ts';
 import { currentUser, requireAuth } from './session.ts';
 
 export const chatRouter = Router();
@@ -16,6 +17,7 @@ chatRouter.use(requireAuth);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NOTES_MAX = 2000;
+const MAX_ACTIVE_RUNS = 2; // research and production runs in progress at once, per user
 
 type MessageRow = { id: string; role: 'user' | 'bot'; body: string; created_at: Date };
 
@@ -70,7 +72,9 @@ function toRunDto(botId: string, row: RunRow) {
 const SELECT_RUNS = `
   SELECT r.id, r.message_id, r.parent_run_id, r.kind, r.idea, r.feedback, r.surprise, r.status, r.error,
          r.result, r.created_at, r.started_at, r.finished_at, r.archived_at,
-         COALESCE((SELECT -SUM(l.amount_cents) FROM credit_ledger l WHERE l.run_id = r.id), 0)::int AS charged_cents,
+         -- What finished parts cost: the ledger, less any hold not used yet.
+         (COALESCE((SELECT -SUM(l.amount_cents) FROM credit_ledger l WHERE l.run_id = r.id), 0)
+           - CASE WHEN r.settled_at IS NULL THEN r.hold_cents - r.spent_cents ELSE 0 END)::int AS charged_cents,
          COALESCE((SELECT json_agg(json_build_object(
                      'id', s.id, 'kind', s.kind, 'title', s.title, 'detail', s.detail, 'created_at', s.created_at
                    ) ORDER BY s.id) FROM run_steps s WHERE s.run_id = r.id), '[]') AS steps,
@@ -118,43 +122,84 @@ chatRouter.get('/:botId/thread', async (req, res) => {
   res.json({ messages: messages.rows.map(toMessageDto), runs: runs.rows.map((r) => toRunDto(botId, r)) });
 });
 
-async function isBusy(botId: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `SELECT 1 FROM runs WHERE bot_id = $1 AND kind <> 'character' AND status IN ('queued', 'running')`,
-    [botId],
-  );
-  return (rowCount ?? 0) > 0;
+type RunFields = {
+  kind: 'research' | 'production'; idea: string; surprise: boolean; feedback: string; parentRunId: string | null;
+};
+
+// A run that can't be started, answered with this status and message.
+class RunRefused extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
 }
 
-// Saves the user's message and queues a run, in one transaction.
+// Saves the user's message and queues a run, in one transaction. The bot's row
+// is locked, so two requests can't both start a run on it; the user's row is
+// locked too, so runs started on several bots at once can't overspend: the
+// run's full price is reserved here, and the unused part refunded when it ends.
+// `prepare` runs inside the transaction (e.g. taking the research being
+// approved), so a refused start leaves everything as it was. Answers refusals
+// itself and returns null.
 async function startRun(
+  res: Response,
   botId: string,
-  body: string,
-  run: {
-    kind: 'research' | 'production'; idea: string; surprise: boolean; feedback: string; parentRunId: string | null;
-    premium?: boolean;
-  },
+  price: number,
+  what: string,
+  prepare: (client: PoolClient) => Promise<{ body: string; run: RunFields }>,
 ) {
+  const userId = currentUser(res).id;
   const client = await pool.connect();
+  let started: { message: MessageRow; runId: string };
   try {
     await client.query('BEGIN');
+    await client.query('SELECT 1 FROM bots WHERE id = $1 FOR UPDATE', [botId]);
+    const { rowCount: busy } = await client.query(
+      `SELECT 1 FROM runs WHERE bot_id = $1 AND kind <> 'character' AND status IN ('queued', 'running')`,
+      [botId],
+    );
+    if (busy) throw new RunRefused(409, 'Your bot is still working on the last idea.');
+
+    const { rows: user } = await client.query<{ credits_cents: number }>(
+      'SELECT credits_cents FROM users WHERE id = $1 FOR UPDATE',
+      [userId],
+    );
+    const { rows: active } = await client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM runs r JOIN bots b ON b.id = r.bot_id
+        WHERE b.user_id = $1 AND r.kind <> 'character' AND r.status IN ('queued', 'running')`,
+      [userId],
+    );
+    if (active[0].count >= MAX_ACTIVE_RUNS) {
+      throw new RunRefused(429, `You can have ${MAX_ACTIVE_RUNS} ideas in progress at once. Try again when one finishes.`);
+    }
+    const have = user[0]?.credits_cents ?? 0;
+    if (have < price) {
+      throw new RunRefused(402, `${what} needs ${dollars(price)} in credits, and your balance is ${dollars(have)}.`);
+    }
+
+    const { body, run } = await prepare(client);
     const msg = await client.query<MessageRow>(
       `INSERT INTO bot_messages (bot_id, role, body) VALUES ($1, 'user', $2) RETURNING id, role, body, created_at`,
       [botId, body],
     );
     const created = await client.query<{ id: string }>(
-      `INSERT INTO runs (bot_id, message_id, parent_run_id, kind, idea, surprise, feedback, premium)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [botId, msg.rows[0].id, run.parentRunId, run.kind, run.idea, run.surprise, run.feedback, run.premium ?? false],
+      `INSERT INTO runs (bot_id, message_id, parent_run_id, kind, idea, surprise, feedback)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [botId, msg.rows[0].id, run.parentRunId, run.kind, run.idea, run.surprise, run.feedback],
     );
+    await reserve(client, userId, created.rows[0].id, price, what);
     await client.query('COMMIT');
-    return { message: toMessageDto(msg.rows[0]), run: await getRun(botId, created.rows[0].id) };
+    started = { message: msg.rows[0], runId: created.rows[0].id };
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err instanceof RunRefused) {
+      res.status(err.status).json({ error: err.message });
+      return null;
+    }
     throw err;
   } finally {
     client.release();
   }
+  return { message: toMessageDto(started.message), run: await getRun(botId, started.runId) };
 }
 
 // POST /api/bots/:botId/messages: { body } with a video idea, or { surprise: true }.
@@ -171,10 +216,6 @@ chatRouter.post('/:botId/messages', async (req, res) => {
     return;
   }
   if (!(await ownsBot(botId, res))) return;
-  if (await isBusy(botId)) {
-    res.status(409).json({ error: 'Your bot is still working on the last idea.' });
-    return;
-  }
   const { rows } = await pool.query<{ character_approved: boolean }>(
     'SELECT character_approved FROM bots WHERE id = $1',
     [botId],
@@ -183,78 +224,62 @@ chatRouter.post('/:botId/messages', async (req, res) => {
     res.status(409).json({ error: 'Approve your character first.' });
     return;
   }
-  if (!(await canAfford(res, PRICES.research, 'Researching an idea'))) return;
-  res.status(201).json(
-    await startRun(botId, surprise ? 'Surprise me!' : body, {
-      kind: 'research', idea: surprise ? '' : body, surprise, feedback: '', parentRunId: null,
-    }),
-  );
+  const started = await startRun(res, botId, PRICES.research, 'Researching an idea', async () => ({
+    body: surprise ? 'Surprise me!' : body,
+    run: { kind: 'research', idea: surprise ? '' : body, surprise, feedback: '', parentRunId: null },
+  }));
+  if (started) res.status(201).json(started);
 });
 
-// 402 with a clear message when the balance can't cover `cents`.
-async function canAfford(res: Response, cents: number, what: string): Promise<boolean> {
-  const have = await balance(currentUser(res).id);
-  if (have >= cents) return true;
-  res.status(402).json({
-    error: `${what} needs ${dollars(cents)} in credits, and your balance is ${dollars(have)}.`,
-  });
-  return false;
-}
-
-// Shared by approve and re-research: the run must be research awaiting approval.
-async function takeResearch(botId: string, runId: string, res: Response) {
-  if (!(await ownsBot(botId, res))) return null;
+// Shared by approve and re-research: the run must be research awaiting
+// approval. Runs inside startRun's transaction.
+async function takeResearch(client: PoolClient, botId: string, runId: string) {
   const { rows } = UUID_RE.test(runId)
-    ? await pool.query<{ idea: string; surprise: boolean }>(
+    ? await client.query<{ idea: string; surprise: boolean }>(
         `UPDATE runs SET status = 'done'
           WHERE id = $1 AND bot_id = $2 AND kind = 'research' AND status = 'awaiting_approval' AND archived_at IS NULL
           RETURNING idea, surprise`,
         [runId, botId],
       )
     : { rows: [] };
-  if (!rows[0]) {
-    res.status(409).json({ error: 'This research isn’t waiting for approval any more.' });
-    return null;
-  }
+  if (!rows[0]) throw new RunRefused(409, 'This research isn’t waiting for approval any more.');
   return rows[0];
 }
 
-// POST /api/bots/:botId/runs/:runId/approve: { notes?, premium? } — write the
-// script and make the video (premium: 2 × 30 s Seedance 2.5 scenes).
+// POST /api/bots/:botId/runs/:runId/approve: { notes? } — write the script and
+// make the video. (Premium Seedance videos are switched off for now; the
+// worker still knows how to make them, but nothing queues them.)
 chatRouter.post('/:botId/runs/:runId/approve', async (req, res) => {
   const { botId, runId } = req.params;
   const notes = notesFrom(req.body).slice(0, NOTES_MAX);
-  const premium = req.body?.premium === true;
-  if (premium) {
-    if (!(await ownsBot(botId, res))) return;
-    if (!(await isPremiumEligible(botId))) {
-      res.status(400).json({ error: 'Premium videos are only for bots whose characters aren’t realistic people.' });
-      return;
-    }
-  }
-  if (!(await canAfford(res, premium ? PREMIUM_PRODUCTION_PRICE : PRODUCTION_PRICE, 'Making this video'))) return;
-  const research = await takeResearch(botId, runId, res);
-  if (!research) return;
-  res.status(201).json(
-    await startRun(botId, notes ? `Approved. ${notes}` : 'Approved. Go ahead!', {
-      kind: 'production', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId, premium,
-    }),
-  );
+  if (!(await ownsBot(botId, res))) return;
+  const started = await startRun(res, botId, PRODUCTION_PRICE, 'Making this video', async (client) => {
+    const research = await takeResearch(client, botId, runId);
+    return {
+      body: notes ? `Approved. ${notes}` : 'Approved. Go ahead!',
+      run: {
+        kind: 'production', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId,
+      },
+    };
+  });
+  if (started) res.status(201).json(started);
 });
 
 // POST /api/bots/:botId/runs/:runId/reresearch: { notes? } — research again, taking the notes into account.
 chatRouter.post('/:botId/runs/:runId/reresearch', async (req, res) => {
   const { botId, runId } = req.params;
   const notes = notesFrom(req.body).slice(0, NOTES_MAX);
-  if (!(await canAfford(res, PRICES.research, 'Researching again'))) return;
-  const research = await takeResearch(botId, runId, res);
-  if (!research) return;
+  if (!(await ownsBot(botId, res))) return;
+  const started = await startRun(res, botId, PRICES.research, 'Researching again', async (client) => {
+    const research = await takeResearch(client, botId, runId);
+    return {
+      body: notes ? `Research this again: ${notes}` : 'Research this again.',
+      run: { kind: 'research', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId },
+    };
+  });
+  if (!started) return;
   await clearKnowledge(runId);
-  res.status(201).json(
-    await startRun(botId, notes ? `Research this again: ${notes}` : 'Research this again.', {
-      kind: 'research', idea: research.idea, surprise: research.surprise, feedback: notes, parentRunId: runId,
-    }),
-  );
+  res.status(201).json(started);
 });
 
 // POST /api/bots/:botId/runs/:runId/cancel — stops a run mid-generation. The
@@ -263,18 +288,21 @@ chatRouter.post('/:botId/runs/:runId/reresearch', async (req, res) => {
 chatRouter.post('/:botId/runs/:runId/cancel', async (req, res) => {
   const { botId, runId } = req.params;
   if (!(await ownsBot(botId, res))) return;
-  const { rowCount } = UUID_RE.test(runId)
-    ? await pool.query(
+  const { rows } = UUID_RE.test(runId)
+    ? await pool.query<{ finished_at: Date | null }>(
         `UPDATE runs SET status = 'canceled',
                          finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END
-          WHERE id = $1 AND bot_id = $2 AND status IN ('queued', 'running')`,
+          WHERE id = $1 AND bot_id = $2 AND status IN ('queued', 'running')
+          RETURNING finished_at`,
         [runId, botId],
       )
-    : { rowCount: 0 };
-  if (!rowCount) {
+    : { rows: [] };
+  if (!rows[0]) {
     res.status(409).json({ error: 'This isn’t running any more.' });
     return;
   }
+  // Never started (finished at once), so no worker will settle it: refund its hold now.
+  if (rows[0].finished_at) await settleRun(runId);
   res.json({ run: await getRun(botId, runId) });
 });
 
@@ -302,6 +330,10 @@ chatRouter.post('/:botId/identity/regenerate', async (req, res) => {
   );
   if (drawing) {
     res.status(409).json({ error: 'Your bot is still drawing. Try again when it’s done.' });
+    return;
+  }
+  if (!(await useDailyQuota(currentUser(res).id, 'regenerate'))) {
+    res.status(429).json({ error: QUOTA_MESSAGE.regenerate });
     return;
   }
 
@@ -351,6 +383,7 @@ chatRouter.get('/:botId/media/:mediaId', async (req, res) => {
   res.set({
     'Content-Type': media.content_type,
     'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "sandbox; default-src 'none'", // never runs as a page, even if opened directly
     'Cache-Control': 'private, max-age=3600',
     'Accept-Ranges': 'bytes',
   });

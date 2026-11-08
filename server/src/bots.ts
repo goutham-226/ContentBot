@@ -7,10 +7,10 @@ import {
   BOT_COLORS, BOT_NAME_MAX, CUSTOM_DESCRIPTION_MAX, CUSTOM_NAME_MAX, DEFAULT_VOICES, IDENTITY_PRESETS, MAX_IMAGE_BYTES,
   MAX_IMAGES, MAX_NICHES, NICHES, VOICES,
 } from './catalog.ts';
-import { draftCharacters, imageQueryFor } from './character.ts';
-import { findReferenceImages } from './referenceImages.ts';
+import { draftCharacters } from './character.ts';
 import { INSTRUCTIONS_MAX, reviseCharacters } from './revise.ts';
 import { CHANNEL_ASSETS, cancelCharacterRuns, queueCharacterRun } from './identity.ts';
+import { QUOTA_MESSAGE, useDailyQuota } from './quota.ts';
 
 export const botsRouter = Router();
 botsRouter.use(requireAuth);
@@ -20,7 +20,6 @@ const upload = multer({
   limits: { fileSize: MAX_IMAGE_BYTES, files: MAX_IMAGES, fields: 1, fieldSize: 16 * 1024 },
 });
 
-const REFERENCE_IMAGE_COUNT = 4;
 const CHARACTER_MAX = 2000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -214,21 +213,6 @@ botsRouter.post('/', upload.array('images', MAX_IMAGES), async (req, res) => {
     return;
   }
 
-  // Skipped uploading: find openly licensed references for the preset style instead.
-  const query = images.length === 0 ? imageQueryFor(parsed.identity.presetId) : null;
-  if (query) {
-    for (const found of await findReferenceImages(query, REFERENCE_IMAGE_COUNT)) {
-      const contentType = sniffImageType(found.data);
-      if (!contentType) continue;
-      images.push({
-        filename: found.filename,
-        contentType,
-        data: found.data,
-        source: { url: found.sourceUrl, creator: found.creator, license: found.license },
-      });
-    }
-  }
-
   const [character, character2] = draftCharacters({
     name: parsed.name,
     niches: parsed.niches,
@@ -310,6 +294,7 @@ botsRouter.get('/:botId/images/:imageId', async (req, res) => {
   res.set({
     'Content-Type': image.content_type,
     'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "sandbox; default-src 'none'", // never runs as a page, even if opened directly
     'Cache-Control': 'private, max-age=3600',
   });
   res.send(image.data);
@@ -346,6 +331,10 @@ botsRouter.post('/:botId/character/revise', async (req, res) => {
     : { rowCount: 0 };
   if (!rowCount) {
     res.status(404).json({ error: 'Bot not found.' });
+    return;
+  }
+  if (!(await useDailyQuota(currentUser(res).id, 'revise'))) {
+    res.status(429).json({ error: QUOTA_MESSAGE.revise });
     return;
   }
   let revised: { text: string; second: string };

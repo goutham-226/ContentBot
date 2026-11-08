@@ -9,33 +9,48 @@ const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 export const MODELS = {
   llm: process.env.REPLICATE_LLM_MODEL ?? 'qwen/qwen3-7-plus',
-  // FLUX.2 [klein] 4B: ~$0.001 per megapixel, with up to 5 reference images.
-  image: process.env.REPLICATE_IMAGE_MODEL ?? 'black-forest-labs/flux-2-klein-4b',
-  // Pruna's reference-to-video model (built on MiniMax H3) at 480p in its
-  // cheaper "cost" mode: ~$0.015/s, and unlike MiniMax it takes a start frame
-  // together with reference images and audio.
-  video: process.env.REPLICATE_VIDEO_MODEL ?? 'prunaai/p-video-2-pro-reference',
+  // Researches topics (articles and openly licensed book summaries) and writes
+  // the clips' scripts. Falls back to the LLM chain.
+  writer: process.env.REPLICATE_WRITER_MODEL ?? 'openai/gpt-5-nano',
+  // GPT Image 2 at low quality, with reference images.
+  image: process.env.REPLICATE_IMAGE_MODEL ?? 'openai/gpt-image-2',
+  // MiniMax H3 Lite, always at 480P (its lowest resolution, to keep costs
+  // down). Takes reference images, videos and audio. Pruna is its backup.
+  video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-lite',
   premiumVideo: process.env.REPLICATE_PREMIUM_VIDEO_MODEL ?? 'bytedance/seedance-2.5',
   voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
+  // Looks at images, e.g. to check whether a character portrait is a realistic person.
+  vision: process.env.REPLICATE_VISION_MODEL ?? 'google/gemini-2.5-flash',
   // Embeddings run locally: see embeddings.ts.
 };
 
 // Backups, tried in order when a model fails.
 export const BACKUPS = {
   llm: ['deepseek-ai/deepseek-v3.1', 'google/gemini-2.5-flash'],
-  // Another FLUX, then Pruna (P-Image Edit with references, P-Image without).
-  image: ['black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
-  // MiniMax H3 Highspeed, only after the main video model has failed
-  // VIDEO_TRIES times.
-  video: ['minimax/h3-highspeed'],
-  // When Seedance fails a premium scene: MiniMax, then Pruna, as 15 s halves.
-  premiumVideo: ['minimax/h3-highspeed', MODELS.video],
+  // FLUX.2 [klein] 4B and 9B, then Pruna (P-Image Edit with references, P-Image without).
+  image: ['black-forest-labs/flux-2-klein-4b', 'black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
+  // Pruna's reference-to-video model (built on MiniMax H3), only after H3 Lite
+  // has failed VIDEO_TRIES times. Unlike MiniMax it takes a start frame
+  // together with reference images and audio.
+  video: ['prunaai/p-video-2-pro-reference'],
+  // When Seedance fails a premium scene (premium is off for now): H3 Lite,
+  // then Pruna, as 15 s halves.
+  premiumVideo: [MODELS.video, 'prunaai/p-video-2-pro-reference'],
 };
 const VIDEO_TRIES = 2;
+// H3 Lite can sit in Replicate's queue; after this long without starting, the
+// clip goes to Pruna instead.
+const VIDEO_START_TIMEOUT_MS = 5 * 60_000;
+const VIDEO_RESOLUTION = '480P'; // H3 Lite's lowest; always sent, as its default is 768P
 const PRUNA_RESOLUTION = '480p';
 const PRUNA_MODE = 'cost'; // one GPU: slower, cheaper than 'speed'
 
 export class ReplicateError extends Error {}
+
+// A prediction that sat in Replicate's queue too long without starting. It's
+// cancelled (nothing was billed), and withFallback moves straight on to the
+// next model instead of queueing on the same one again.
+export class NotStartedError extends ReplicateError {}
 
 // Failures another model can't fix: no token, a bad token, or no Replicate credit.
 function isAccountProblem(err: unknown): boolean {
@@ -62,7 +77,8 @@ export async function withFallback<T>(
         lastError = err;
         const reason = err instanceof Error ? err.message : String(err);
         console.warn(`${model} failed (${task}, try ${attempt}/${tries}): ${reason}`);
-        const next = attempt < tries ? model : chain[i + 1]?.model;
+        const retry = attempt < tries && !(err instanceof NotStartedError);
+        const next = retry ? model : chain[i + 1]?.model;
         if (next) {
           await runContext.getStore()?.notify?.(
             next === model
@@ -71,6 +87,7 @@ export async function withFallback<T>(
             reason,
           ).catch(() => {});
         }
+        if (!retry) break;
       }
     }
   }
@@ -173,17 +190,25 @@ export async function cancelPrediction(id: string) {
   await api(`${API_BASE}/predictions/${id}/cancel`, { method: 'POST' }).catch(() => {});
 }
 
-async function predict(model: string, input: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+// `startTimeoutMs`: give up (and cancel) if the prediction hasn't started by then.
+async function predict(
+  model: string, input: Record<string, unknown>, timeoutMs: number, startTimeoutMs?: number,
+): Promise<unknown> {
   throwIfCanceled();
   const ctx = runContext.getStore();
   let prediction = await createPrediction(model, input);
   ctx?.predictions.add(prediction.id);
   try {
     const deadline = Date.now() + timeoutMs;
+    const startDeadline = startTimeoutMs === undefined ? Infinity : Date.now() + startTimeoutMs;
     while (prediction.status === 'starting' || prediction.status === 'processing') {
       if (ctx?.canceled) {
         await cancelPrediction(prediction.id);
         throw new CanceledError();
+      }
+      if (prediction.status === 'starting' && Date.now() > startDeadline) {
+        await cancelPrediction(prediction.id);
+        throw new NotStartedError(`${model} didn’t start within ${Math.round((startTimeoutMs ?? 0) / 60_000)} minutes.`);
       }
       if (Date.now() > deadline) throw new ReplicateError(`${model} took too long.`);
       await new Promise((r) => setTimeout(r, POLL_MS));
@@ -210,15 +235,37 @@ export async function uploadFile(data: Buffer, contentType: string, filename: st
 export async function download(url: string): Promise<{ data: Buffer; contentType: string }> {
   const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
   if (!res.ok) throw new ReplicateError(`Couldn’t download the result (${res.status}).`);
-  const data = Buffer.from(await res.arrayBuffer());
-  if (data.length > MAX_DOWNLOAD_BYTES) throw new ReplicateError('The result was too large to save.');
-  return { data, contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
+  const tooLarge = () => new ReplicateError('The result was too large to save.');
+  if (Number(res.headers.get('content-length') ?? 0) > MAX_DOWNLOAD_BYTES) {
+    await res.body?.cancel().catch(() => {});
+    throw tooLarge();
+  }
+  // Read in chunks, giving up as soon as it's over the limit.
+  const reader = res.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (reader) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_DOWNLOAD_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  return { data: Buffer.concat(chunks), contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
 }
 
 // Gemini names its length limit differently and can "think" first; thinking is
 // off because these prompts are structured extraction and writing, and it
 // keeps runs fast and cheap. Other models (Qwen, DeepSeek) take max_tokens.
 function textInput(model: string, prompt: string, maxTokens: number): Record<string, unknown> {
+  // GPT-5 has no temperature. Low reasoning lets it plan an explanation that
+  // holds together; the budget is doubled so the thinking can't crowd out the answer.
+  if (model.startsWith('openai/gpt-5')) {
+    return { prompt, max_completion_tokens: maxTokens * 2, reasoning_effort: 'low' };
+  }
   if (model.startsWith('google/gemini')) {
     return { prompt, max_output_tokens: maxTokens, temperature: 0.7, thinking_budget: 0 };
   }
@@ -228,14 +275,38 @@ function textInput(model: string, prompt: string, maxTokens: number): Record<str
 // The LLM first, then its backups. Callers that check the answer (e.g. for
 // valid JSON) pass their own job to withFallback with this chain.
 export const LLM_CHAIN = [MODELS.llm, ...BACKUPS.llm].map((model) => ({ model, tries: 1 }));
+// Research and script writing: the writer first, then the LLM chain.
+export const WRITER_CHAIN = [MODELS.writer, MODELS.llm, ...BACKUPS.llm].map((model) => ({ model, tries: 1 }));
 
 export async function generateText(prompt: string, maxTokens = 2048, model = MODELS.llm): Promise<string> {
   const output = await predict(model, textInput(model, prompt, maxTokens), 5 * 60_000);
   return Array.isArray(output) ? output.join('') : String(output ?? '');
 }
 
+// Asks the vision model about images (data: URLs or public links). Low
+// temperature, since callers use it to classify.
+export async function generateTextFromImages(prompt: string, images: string[], maxTokens = 64): Promise<string> {
+  const output = await predict(
+    MODELS.vision,
+    { prompt, images, max_output_tokens: maxTokens, temperature: 0, thinking_budget: 0 },
+    2 * 60_000,
+  );
+  return Array.isArray(output) ? output.join('') : String(output ?? '');
+}
+
 // Each image model family names its inputs differently.
 function imageInput(model: string, prompt: string, references: string[], aspectRatio: string, megapixels: 1 | 2) {
+  if (model.startsWith('openai/gpt-image')) {
+    return {
+      prompt,
+      ...(references.length > 0 && { input_images: references.slice(0, 10) }),
+      aspect_ratio: aspectRatio,
+      quality: 'low',
+      background: 'opaque',
+      output_format: 'jpeg',
+      number_of_images: 1,
+    };
+  }
   if (model.includes('flux-2-klein')) {
     return {
       prompt,
@@ -317,11 +388,10 @@ export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2,
 
 // Returns the generated video's (temporary) URL. References must be public
 // URLs, so pass Replicate output links straight from the same run. Reference
-// video seconds are billed like output seconds.
-// `firstFrame` (the previous clip's last frame) opens the clip on Pruna, in
-// place of the previous clip as a reference video, which costs far more.
-// MiniMax can't combine a start frame with references, so it gets the
-// previous clip instead.
+// video seconds are billed like output seconds. MiniMax can't combine a start
+// frame with references, so it gets the previous clip as a reference video;
+// the Pruna backup opens on `firstFrame` (the previous clip's last frame)
+// instead, which costs far less than a reference video.
 // Seedance 2.5 (premium): up to 30 reference images and 10 audio clips, 30 s of
 // audio in all. Reference videos would quadruple the price per second, and a
 // first frame can't be combined with references, so neither is sent.
@@ -364,13 +434,11 @@ export async function generateVideo(
   models: string[] = [MODELS.video, ...BACKUPS.video], // the first gets VIDEO_TRIES tries
 ): Promise<string> {
   const { firstFrame } = references;
-  const visual = references.images.length > 0 || references.videos.length > 0 || Boolean(firstFrame);
   const videos = references.videos.slice(0, VIDEO_LIMITS.videos);
+  // Both models need a reference image or video alongside any reference audio.
+  const visual = references.images.length > 0 || videos.length > 0;
   const audio = visual ? references.audio.slice(0, VIDEO_LIMITS.audio) : [];
-  // Both models need at least one reference image or video.
-  const chain = visual
-    ? models.map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }))
-    : [{ model: models[0], tries: VIDEO_TRIES }];
+  const chain = models.map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }));
   return withFallback(chain, 'rendering the clip', async (model) => {
     const pruna = model.startsWith('prunaai/');
     // Pruna counts the start frame as one of its 9 reference images.
@@ -389,14 +457,14 @@ export async function generateVideo(
         }
       : {
           prompt,
-          duration,
+          duration: Math.min(Math.max(duration, 4), 15), // H3 Lite takes 4–15 s
           ratio: '9:16',
+          resolution: VIDEO_RESOLUTION,
           ...(images.length > 0 && { reference_image_urls: images }),
           ...(videos.length > 0 && { reference_video_urls: videos }),
-          // MiniMax needs a reference image or video alongside any reference audio.
           ...(audio.length > 0 && { reference_audio_urls: audio }),
         };
-    const output = await predict(model, input, 20 * 60_000);
+    const output = await predict(model, input, 20 * 60_000, pruna ? undefined : VIDEO_START_TIMEOUT_MS);
     const url = Array.isArray(output) ? output[0] : output;
     if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
     return url;

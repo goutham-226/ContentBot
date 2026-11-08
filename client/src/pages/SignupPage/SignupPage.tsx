@@ -79,7 +79,7 @@ export default function SignupPage() {
   const canSubmit =
     email.trim().length > 0 &&
     username.trim().length > 0 &&
-    password.length >= 6 &&
+    password.length >= 8 && password.length <= 256 &&
     !fieldErrors.email &&
     !fieldErrors.username;
 

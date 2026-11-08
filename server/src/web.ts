@@ -2,8 +2,10 @@
 //  - Hacker News (via Algolia's free API) gives real links ranked by points.
 //  - Google News RSS gives fresh headlines; its links are obfuscated, so only
 //    titles and publishers are used, as a signal for what's trending.
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { lookup } from 'node:dns';
+import type { LookupAddress, LookupAllOptions, LookupOptions } from 'node:dns';
+import { BlockList, isIP } from 'node:net';
+import { Agent, fetch } from 'undici';
 
 const USER_AGENT = 'Mozilla/5.0 (compatible; TwinfluencerBot/0.1; research)';
 const TIMEOUT_MS = 10_000;
@@ -68,32 +70,62 @@ export async function searchGoogleNews(query: string, limit: number): Promise<Ar
 
 // --- Reading pages -------------------------------------------------------
 
-function isPrivateAddress(address: string): boolean {
-  const v4 = address.startsWith('::ffff:') ? address.slice(7) : address;
-  if (isIP(v4) === 4) {
-    const [a, b] = v4.split('.').map(Number);
-    return (
-      a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224
-    );
-  }
-  const lower = address.toLowerCase();
-  return lower === '::' || lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80');
+// Everything that isn't the public internet. BlockList parses addresses
+// properly, and checks IPv4-mapped IPv6 (::ffff:7f00:1, ::ffff:127.0.0.1)
+// against the IPv4 rules, so the embedded address is what counts.
+const PRIVATE = new BlockList();
+for (const [net, prefix] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
+  ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3], // multicast, reserved, broadcast
+] as const) PRIVATE.addSubnet(net, prefix, 'ipv4');
+for (const [net, prefix] of [
+  ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['fc00::', 7], ['fe80::', 10], ['2002::', 16],
+] as const) PRIVATE.addSubnet(net, prefix, 'ipv6');
+
+export function isPrivateAddress(address: string): boolean {
+  const family = isIP(address);
+  if (family === 0) return true; // not an address: refuse rather than guess
+  return PRIVATE.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
 // Article links come from the internet, so never let one point the server at
 // itself or the local network.
-async function assertPublicUrl(raw: string): Promise<URL> {
+export async function assertPublicUrl(raw: string): Promise<URL> {
   const url = new URL(raw);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Unsupported link.');
   if (url.port && url.port !== '80' && url.port !== '443') throw new Error('Unsupported port.');
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
+  const addresses = isIP(host) ? [{ address: host }] : await lookupAll(host);
   if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address))) {
     throw new Error('Link points to a private address.');
   }
   return url;
 }
+
+const lookupAll = (host: string) =>
+  new Promise<LookupAddress[]>((resolve, reject) => {
+    lookup(host, { all: true }, (err, addresses) => (err ? reject(err) : resolve(addresses)));
+  });
+
+// DNS lookup for the page fetcher's sockets. The connection goes to exactly
+// the addresses checked here, so a hostname can't pass assertPublicUrl and
+// then resolve to a private address when fetch looks it up again (DNS
+// rebinding). IP-literal hosts skip lookup and are checked by assertPublicUrl.
+export function publicLookup(
+  hostname: string,
+  options: LookupOptions,
+  callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+) {
+  lookup(hostname, { ...options, all: true } as LookupAllOptions, (err, addresses) => {
+    if (err) return callback(err, []);
+    const bad = addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address));
+    if (bad) return callback(Object.assign(new Error('Link points to a private address.'), { code: 'EPRIVATE' }), []);
+    if (options.all) return callback(null, addresses);
+    callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+const publicAgent = new Agent({ connect: { lookup: publicLookup } });
 
 async function fetchPage(raw: string): Promise<string> {
   let url = await assertPublicUrl(raw);
@@ -102,6 +134,7 @@ async function fetchPage(raw: string): Promise<string> {
       headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
       redirect: 'manual',
       signal: AbortSignal.timeout(TIMEOUT_MS),
+      dispatcher: publicAgent, // every hop connects only to checked addresses
     });
     const location = res.headers.get('location');
     if (res.status >= 300 && res.status < 400 && location) {

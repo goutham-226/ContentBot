@@ -15,14 +15,12 @@ type CharacterSeed = {
 
 type PresetSeed = {
   style: string; // what the models are told about the visual style
-  imageQuery: string; // Openverse search used when the user skips uploading images
   characters: CharacterSeed[]; // 1 or 2
 };
 
 const SEEDS = new Map<string, PresetSeed>([
   ['peter-stewie', {
     style: 'Flat, bold-outline adult-animation TV cartoon style with simple shading. Original character designs, not from any existing show.',
-    imageQuery: 'cartoon family',
     characters: [
       {
         name: 'Big Lou',
@@ -40,7 +38,6 @@ const SEEDS = new Map<string, PresetSeed>([
   }],
   ['zackd-films', {
     style: 'Short, realistic 3D animation with x-ray cutaways that show what happens inside. Original look and characters.',
-    imageQuery: '3d animation character',
     characters: [{
       look: 'Everyday 3D-animated people in realistic settings, with x-ray cutaways that show what happens inside.',
       personality: 'Curious and a little dramatic: always asking “what happens if…?”',
@@ -48,17 +45,15 @@ const SEEDS = new Map<string, PresetSeed>([
     }],
   }],
   ['retro-cartoon', {
-    style: 'A 1930s-40s rubber-hose cartoon in full vintage Technicolor: warm, saturated retro colours (tomato red, mustard yellow, teal, cream) with soft film grain and hand-painted backgrounds. Never black and white.',
-    imageQuery: 'vintage cartoon',
+    style: 'A 1920s silent-era cartoon in black and white only: hand-inked lines, solid black and white shapes with flat grey tones, bouncy looping animation, flickering film grain, scratches, dust specks and a vignette, like an old cartoon reel. The star is an imaginary cartoon character, never a human. Never any colour.',
     characters: [{
-      look: 'A 1930s rubber-hose cartoon character with pie-cut eyes and white gloves, in warm vintage Technicolor colours.',
+      look: 'An imaginary character that looks like it is from a 1920s cartoon, not a human, drawn in black and white ink. It looks the same in every shot.',
       personality: 'Cheerful, bouncy and endlessly optimistic.',
       voice: 'An old-time newsreel announcer.',
     }],
   }],
   ['stick-figure', {
     style: 'Simple hand-drawn stick figures in marker on a white background, with handwritten labels.',
-    imageQuery: 'stick figure drawing',
     characters: [{
       look: 'A simple stick figure on a white background, drawn with quick marker lines and handwritten labels.',
       personality: 'Dry and to the point.',
@@ -67,7 +62,6 @@ const SEEDS = new Map<string, PresetSeed>([
   }],
   ['skeleton', {
     style: 'A clean cartoon look with a deadpan skeleton presenter.',
-    imageQuery: 'cartoon skeleton',
     characters: [{
       look: 'A grinning cartoon skeleton in a sharp suit, standing in front of a chalkboard.',
       personality: 'Deadpan, with dark humour and surprising warmth.',
@@ -76,7 +70,6 @@ const SEEDS = new Map<string, PresetSeed>([
   }],
   ['human-ai-model', {
     style: 'Photorealistic, softly lit studio video with a fictional presenter.',
-    imageQuery: 'studio portrait',
     characters: [{
       look: 'A realistic, fictional presenter, neat and camera-ready, in a clean, softly lit studio.',
       personality: 'A friendly expert who never talks down to viewers.',
@@ -84,10 +77,6 @@ const SEEDS = new Map<string, PresetSeed>([
     }],
   }],
 ]);
-
-export function imageQueryFor(presetId: string | null): string | null {
-  return presetId ? (SEEDS.get(presetId)?.imageQuery ?? null) : null;
-}
 
 // The visual style to give models: never the preset's (possibly trademarked) name.
 export function styleFor(presetId: string | null, identityName: string, identityDescription: string): string {

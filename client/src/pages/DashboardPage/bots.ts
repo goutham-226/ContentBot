@@ -33,8 +33,6 @@ export type Bot = {
   identity: ChannelIdentity;
   images: BotImage[]; // supporting images for the identity; at least 1 when custom
   character: BotCharacter;
-  // Premium videos (Seedance 2.5) need non-human characters; null until checked.
-  premiumEligible: boolean | null;
   createdAt: string;
 };
 

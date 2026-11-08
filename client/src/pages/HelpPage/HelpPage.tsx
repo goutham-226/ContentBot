@@ -22,7 +22,7 @@ const faqs = [
   },
   {
     q: 'How does pricing work?',
-    a: 'You pay per video, with no subscription. Buy 1 video for $7, 5 videos for $29.99, or 10 videos for $60.',
+    a: 'You buy credit packs, with no subscription. Basic ($11.98) covers 2 videos, Plus ($28.49) 5, Pro ($53.99) 10 and Studio ($101.99) 20.',
   },
   {
     q: 'Is my password safe?',
