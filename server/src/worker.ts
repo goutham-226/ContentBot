@@ -771,6 +771,7 @@ Reply with JSON only:
     {
       "voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line"}, ...${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words in total for this scene, no stage directions${characters.length === 2 ? ', a back-and-forth between both characters' : ''}],
       "bridge": "how this scene hands over to the next one: the question it leaves AND the shot it ends on that the next scene opens on (empty for the last scene)",
+      "sfx": "3-5 specific sound effects timed to this scene's action and facts, e.g. 'whoosh as the camera dives in, wet squelch as the flea bites, distant church bell, crowd gasps'",
       "location": "the specific place this scene happens, in a few words (e.g. 'inside a human artery', 'a foggy cursed village at midnight')",
       "example": "the concrete example on screen that proves this scene's point",
       "action": "what the character physically does in the scene (never just standing and talking)",
@@ -818,6 +819,7 @@ Reply with JSON only:
         frame: withStaging(str(sc.frame)),
         video: withStaging(str(sc.video)) && `${withStaging(str(sc.video))}\nThe character is moving and interacting with the scene, not standing still talking to the camera.`,
         bridge: str(sc.bridge),
+        sfx: str(sc.sfx),
       };
     })
     .filter((sc) => sc.video || sc.frame)
@@ -829,6 +831,8 @@ Reply with JSON only:
         i > 0 && all[i - 1].bridge && `Opens exactly where the previous clip ended: ${all[i - 1].bridge}`,
         sc.video,
         i < all.length - 1 && sc.bridge && `Ends on: ${sc.bridge}`,
+        // MiniMax generates the clip's sound; ask for punchy effects under the voice.
+        `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
       ].filter(Boolean).join('\n'),
     }));
   if (scenes.length === 0) throw new Error(`${MODELS.llm} didn’t write any scenes.`);
