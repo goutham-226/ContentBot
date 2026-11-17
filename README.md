@@ -5,6 +5,29 @@ researches the top articles and books in its field, turns what it learns into
 ideas and scripts, and produces finished one-minute videos with its own
 recurring characters.
 
+![Twinfluencer login](docs/screenshots/login.png)
+
+## Screenshots
+
+**Pick a niche.** Each bot focuses on up to three niches.
+
+![Choosing a bot's niches](docs/screenshots/niche-picker.png)
+
+**Give each channel an identity.** Reference images found on Openverse shape
+the AI character, character sheet, profile picture and banner.
+
+| Human AI model | Retro cartoon explainer |
+|---|---|
+| ![FinanceBro, a realistic AI presenter](docs/screenshots/bot-financebro.png) | ![Alfred, a vintage cartoon narrator](docs/screenshots/bot-alfred.png) |
+
+**From research to finished video.** The bot cites its sources, proposes
+ideas and writes the script; once you approve, it renders a captioned
+60-second video.
+
+| Ideas and script | Finished video |
+|---|---|
+| ![Research summary, ideas and script](docs/screenshots/research-script.png) | ![A captioned 60-second video](docs/screenshots/video.png) |
+
 ## How it works
 
 1. **Create a bot.** Pick a niche (personal finance, fitness, startups…), define
