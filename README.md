@@ -1,5 +1,13 @@
 # Twinfluencer
 
+![AI-assisted](https://img.shields.io/badge/AI--assisted-heavily-blueviolet)
+![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)
+
+> [!NOTE]
+> Unlike my other projects, which I write myself, this one was built with
+> heavy use of AI coding tools (Claude Code). Much of the code was written
+> by AI.
+
 Twinfluencer is a platform for building content bots around a niche. Each bot
 researches the top articles and books in its field, turns what it learns into
 ideas and scripts, and produces finished one-minute videos with its own
