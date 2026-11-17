@@ -3,6 +3,20 @@
 ![AI-assisted](https://img.shields.io/badge/AI--assisted-heavily-blueviolet)
 ![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)
 
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React_19-20232A?logo=react&logoColor=61DAFB)
+![React Router](https://img.shields.io/badge/React_Router-CA4245?logo=reactrouter&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
+![Oxlint](https://img.shields.io/badge/Oxlint-1A1A2E?logo=oxc&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-5FA04E?logo=nodedotjs&logoColor=white)
+![Express](https://img.shields.io/badge/Express_5-000000?logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL_17-4169E1?logo=postgresql&logoColor=white)
+![pgvector](https://img.shields.io/badge/pgvector-336791?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![Replicate](https://img.shields.io/badge/Replicate-000000?logo=replicate&logoColor=white)
+![Hugging Face Transformers](https://img.shields.io/badge/Transformers.js-FFD21E?logo=huggingface&logoColor=black)
+![FFmpeg](https://img.shields.io/badge/FFmpeg-007808?logo=ffmpeg&logoColor=white)
+
 > [!NOTE]
 > Unlike my other projects, which I write myself, this one was built with
 > heavy use of AI coding tools (Claude Code). Much of the code was written
