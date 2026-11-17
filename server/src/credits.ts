@@ -7,24 +7,19 @@ import type { PoolClient } from 'pg';
 import { pool } from './db.ts';
 
 // A one-minute video costs $5.99 (the user's price), charged as each part
-// finishes. Must sum to 599 for the standard 4 scenes: 70 + 29 + 4×15 + 4×10 + 4×100.
-// Clips are MiniMax H3 Lite at 480P (Pruna only as a backup), taken as
-// $0.025/s. A video is 60 s out plus up to 45 s of previous-clip reference
-// video (billed like output): ~$2.88 with research, script, frames (GPT Image 2
-// at low quality, 83 images per $1, so ~1.2¢ each) and voices, so ~52% margin
-// at full price and ~44% at the Studio discount.
+// finishes. Must sum to 599: 70 + 29 + 2×250.
+// Clips are Kling 4.0 at 720p: $0.157/s with images only, $0.094/s with a
+// reference video, billed for the output plus the reference's length. Clip 1
+// (30 s, images) ~$4.71; clip 2 (30 s out + 30 s of clip 1 as reference)
+// ~$5.64; so a video costs us ~$10.40 and LOSES ~$4.40 at this price.
+// Kling speaks the lines itself, so there is no separate voice model.
 // Not covered: a run restarted after an interruption redoes its parts at our cost.
 export const PRICES = {
   research: 70,
   script: 29,
-  frame: 15,
-  sceneVoice: 10, // per scene; split between characters for duos
-  clip: 100,
-  premiumClip: 800, // one 30 s Seedance 2.5 clip at 480p (costs us ~$3.08); premium is off for now
+  clip: 250, // per 30 s scene; a scene the backups render as two halves is charged half each
 };
-export const PRODUCTION_PRICE = PRICES.script + 4 * (PRICES.frame + PRICES.sceneVoice + PRICES.clip);
-// Premium: 2 × 30 s scenes, $16.80 in all.
-export const PREMIUM_PRODUCTION_PRICE = PRICES.script + 2 * (PRICES.frame + PRICES.sceneVoice + PRICES.premiumClip);
+export const PRODUCTION_PRICE = PRICES.script + 2 * PRICES.clip;
 // One standard video, research included: $5.99.
 export const VIDEO_PRICE = PRICES.research + PRODUCTION_PRICE;
 

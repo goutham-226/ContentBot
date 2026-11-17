@@ -14,11 +14,10 @@ export const MODELS = {
   writer: process.env.REPLICATE_WRITER_MODEL ?? 'openai/gpt-5-nano',
   // GPT Image 2 at low quality, with reference images.
   image: process.env.REPLICATE_IMAGE_MODEL ?? 'openai/gpt-image-2',
-  // MiniMax H3 Lite, always at 480P (its lowest resolution, to keep costs
-  // down). Takes reference images, videos and audio. Pruna is its backup.
-  video: process.env.REPLICATE_VIDEO_MODEL ?? 'minimax/h3-lite',
-  premiumVideo: process.env.REPLICATE_PREMIUM_VIDEO_MODEL ?? 'bytedance/seedance-2.5',
-  voice: process.env.REPLICATE_VOICE_MODEL ?? 'qwen/qwen3-tts',
+  // Kling 4.0 at 720p (its lowest): 30 s clips with the speech, sound effects
+  // and lip-sync generated in the clip itself, from the bot's character images
+  // and the previous clip as references.
+  video: process.env.REPLICATE_VIDEO_MODEL ?? 'kwaivgi/kling-v4.0',
   // Looks at images, e.g. to check whether a character portrait is a realistic person.
   vision: process.env.REPLICATE_VISION_MODEL ?? 'google/gemini-2.5-flash',
   // Embeddings run locally: see embeddings.ts.
@@ -29,19 +28,16 @@ export const BACKUPS = {
   llm: ['deepseek-ai/deepseek-v3.1', 'google/gemini-2.5-flash'],
   // FLUX.2 [klein] 4B and 9B, then Pruna (P-Image Edit with references, P-Image without).
   image: ['black-forest-labs/flux-2-klein-4b', 'black-forest-labs/flux-2-klein-9b', 'prunaai/p-image-edit'],
-  // Pruna's reference-to-video model (built on MiniMax H3), only after H3 Lite
-  // has failed VIDEO_TRIES times. Unlike MiniMax it takes a start frame
-  // together with reference images and audio.
-  video: ['prunaai/p-video-2-pro-reference'],
-  // When Seedance fails a premium scene (premium is off for now): H3 Lite,
-  // then Pruna, as 15 s halves.
-  premiumVideo: [MODELS.video, 'prunaai/p-video-2-pro-reference'],
+  // When Kling fails a scene twice: MiniMax H3 Lite, then Pruna's reference
+  // model, each rendering the scene as two 15 s halves.
+  video: ['minimax/h3-lite', 'prunaai/p-video-2-pro-reference'],
 };
 const VIDEO_TRIES = 2;
 // H3 Lite can sit in Replicate's queue; after this long without starting, the
-// clip goes to Pruna instead.
+// half goes to Pruna instead.
 const VIDEO_START_TIMEOUT_MS = 5 * 60_000;
-const VIDEO_RESOLUTION = '480P'; // H3 Lite's lowest; always sent, as its default is 768P
+const KLING_RESOLUTION = '720p'; // Kling's lowest
+const H3_RESOLUTION = '480P'; // H3 Lite's lowest; always sent, as its default is 768P
 const PRUNA_RESOLUTION = '480p';
 const PRUNA_MODE = 'cost'; // one GPU: slower, cheaper than 'speed'
 
@@ -359,112 +355,68 @@ export async function generateImage(
   });
 }
 
-// Returns the voiceover's (temporary) URL. Qwen3-TTS is the best value on
-// Replicate (~$0.02 per 1,000 characters). A preset speaker keeps the voice
-// identical across scenes and videos; the style instruction only changes the
-// delivery (pace, energy, emotion), not who is speaking.
-export async function generateSpeech(text: string, speaker: string, styleInstruction = ''): Promise<string> {
-  const output = await predict(
-    MODELS.voice,
-    {
-      text,
-      mode: 'custom_voice',
-      speaker,
-      language: 'auto',
-      ...(styleInstruction && { style_instruction: styleInstruction }),
-    },
-    5 * 60_000,
-  );
-  const url = Array.isArray(output) ? output[0] : output;
-  if (typeof url !== 'string') throw new ReplicateError('The voice model returned no audio.');
-  return url;
-}
+// What each video model takes as references. Kling: up to 10 images, and
+// reference videos of 3-30 s each, 30 s in all. MiniMax H3: up to 9 images and
+// 3 videos, each 2-15 s, 15 s in all. Pruna: 9 images (a start frame counts as
+// one). Reference video seconds are billed like output seconds.
+// H3 and Pruna can only fetch public URLs (Replicate output links), not
+// uploads to the Files API, so they're only given the previous clip.
+export const VIDEO_LIMITS = {
+  kling: { images: 10, minVideoSeconds: 3, maxVideoSeconds: 30 },
+  backup: { images: 9, minVideoSeconds: 2, maxVideoSeconds: 15 },
+};
 
-// MiniMax H3's reference rules: up to 9 images; up to 3 videos and 3 audio
-// clips, each 2–15 s and at most 15 s of each in total; audio only alongside
-// an image or video. URLs must be publicly fetchable, so only Replicate output
-// links work (uploads to the Files API need auth). Callers check durations.
-export const VIDEO_LIMITS = { images: 9, videos: 3, audio: 3, minClipSeconds: 2, maxTotalSeconds: 15 };
+export type ClipReferences = {
+  images: string[]; // character images: Kling names them @image_1, @image_2… in this order
+  previous: { url: string; seconds: number } | null; // the previous clip, to carry the action on
+  firstFrame?: string | null; // data URL of the previous clip's last frame, for Pruna
+};
 
-// Returns the generated video's (temporary) URL. References must be public
-// URLs, so pass Replicate output links straight from the same run. Reference
-// video seconds are billed like output seconds. MiniMax can't combine a start
-// frame with references, so it gets the previous clip as a reference video;
-// the Pruna backup opens on `firstFrame` (the previous clip's last frame)
-// instead, which costs far less than a reference video.
-// Seedance 2.5 (premium): up to 30 reference images and 10 audio clips, 30 s of
-// audio in all. Reference videos would quadruple the price per second, and a
-// first frame can't be combined with references, so neither is sent.
-export const PREMIUM_LIMITS = { images: 30, audio: 10, maxAudioSeconds: 30 };
-// Always Seedance's lowest resolution (the user's choice, to keep costs down).
-const PREMIUM_RESOLUTION = '480p';
-const PREMIUM_TRIES = 2;
-
-// One premium clip. Its prompt labels the references as [Image1]… and [Audio1]…
-// in the order given here.
-export async function generatePremiumVideo(
-  prompt: string,
-  references: { images: string[]; audio: string[] },
-  duration: number,
-): Promise<string> {
-  const images = references.images.slice(0, PREMIUM_LIMITS.images);
-  // Seedance needs an image or video reference alongside any reference audio.
-  const audio = images.length > 0 ? references.audio.slice(0, PREMIUM_LIMITS.audio) : [];
-  return withFallback([{ model: MODELS.premiumVideo, tries: PREMIUM_TRIES }], 'rendering the premium clip', async (model) => {
-    const output = await predict(model, {
-      prompt,
-      duration: Math.min(Math.max(duration, 4), 30),
-      resolution: PREMIUM_RESOLUTION,
-      aspect_ratio: '9:16',
-      generate_audio: true,
-      watermark: false,
-      ...(images.length > 0 && { reference_images: images }),
-      ...(audio.length > 0 && { reference_audios: audio }),
-    }, 30 * 60_000);
-    const url = Array.isArray(output) ? output[0] : output;
-    if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
-    return url;
-  });
-}
-
+// Returns the generated video's (temporary) URL. The first model gets
+// VIDEO_TRIES tries, the rest one each.
 export async function generateVideo(
   prompt: string,
-  references: { images: string[]; audio: string[]; videos: string[]; firstFrame?: string | null },
+  references: ClipReferences,
   duration: number,
-  models: string[] = [MODELS.video, ...BACKUPS.video], // the first gets VIDEO_TRIES tries
+  models: string[] = [MODELS.video],
 ): Promise<string> {
-  const { firstFrame } = references;
-  const videos = references.videos.slice(0, VIDEO_LIMITS.videos);
-  // Both models need a reference image or video alongside any reference audio.
-  const visual = references.images.length > 0 || videos.length > 0;
-  const audio = visual ? references.audio.slice(0, VIDEO_LIMITS.audio) : [];
+  const { previous, firstFrame } = references;
   const chain = models.map((model, i) => ({ model, tries: i === 0 ? VIDEO_TRIES : 1 }));
   return withFallback(chain, 'rendering the clip', async (model) => {
-    const pruna = model.startsWith('prunaai/');
-    // Pruna counts the start frame as one of its 9 reference images.
-    const images = references.images.slice(0, VIDEO_LIMITS.images - (pruna && firstFrame ? 1 : 0));
-    const input = pruna
-      ? {
-          prompt,
-          duration: Math.min(Math.max(duration, 5), 15),
-          aspect_ratio: '9:16',
-          resolution: PRUNA_RESOLUTION,
-          mode: PRUNA_MODE,
-          ...(firstFrame && { first_frame_image: firstFrame }),
-          ...(images.length > 0 && { image: images }),
-          ...(!firstFrame && videos.length > 0 && { video: videos }),
-          ...(audio.length > 0 && { audio }),
-        }
-      : {
-          prompt,
-          duration: Math.min(Math.max(duration, 4), 15), // H3 Lite takes 4–15 s
-          ratio: '9:16',
-          resolution: VIDEO_RESOLUTION,
-          ...(images.length > 0 && { reference_image_urls: images }),
-          ...(videos.length > 0 && { reference_video_urls: videos }),
-          ...(audio.length > 0 && { reference_audio_urls: audio }),
-        };
-    const output = await predict(model, input, 20 * 60_000, pruna ? undefined : VIDEO_START_TIMEOUT_MS);
+    let input: Record<string, unknown>;
+    if (model.startsWith('kwaivgi/kling')) {
+      const { images, minVideoSeconds, maxVideoSeconds } = VIDEO_LIMITS.kling;
+      const video = previous && previous.seconds >= minVideoSeconds && previous.seconds <= maxVideoSeconds ? previous.url : null;
+      input = {
+        prompt,
+        duration: Math.min(Math.max(Math.round(duration), 3), 30),
+        resolution: KLING_RESOLUTION,
+        aspect_ratio: '9:16',
+        ...(references.images.length > 0 && { reference_images: references.images.slice(0, images) }),
+        ...(video && { reference_videos: [video] }),
+      };
+    } else {
+      const { minVideoSeconds, maxVideoSeconds } = VIDEO_LIMITS.backup;
+      const video = previous && previous.seconds >= minVideoSeconds && previous.seconds <= maxVideoSeconds ? previous.url : null;
+      input = model.startsWith('prunaai/')
+        ? {
+            prompt,
+            duration: Math.min(Math.max(duration, 5), 15),
+            aspect_ratio: '9:16',
+            resolution: PRUNA_RESOLUTION,
+            mode: PRUNA_MODE,
+            ...(firstFrame ? { first_frame_image: firstFrame } : video && { video: [video] }),
+          }
+        : {
+            prompt,
+            duration: Math.min(Math.max(duration, 4), 15), // H3 Lite takes 4-15 s
+            ratio: '9:16',
+            resolution: H3_RESOLUTION,
+            ...(video && { reference_video_urls: [video] }),
+          };
+    }
+    const queued = model.startsWith('minimax/') ? VIDEO_START_TIMEOUT_MS : undefined;
+    const output = await predict(model, input, 30 * 60_000, queued);
     const url = Array.isArray(output) ? output[0] : output;
     if (typeof url !== 'string') throw new ReplicateError(`${model} returned no video.`);
     return url;

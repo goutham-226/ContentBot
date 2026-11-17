@@ -6,10 +6,10 @@
 //   character:  draw the bot's permanent character portrait (kept with the bot)
 //   research:   plan -> (web search ‖ book summaries) -> read articles (in parallel)
 //               -> (knowledge base ‖ analysis) -> wait for the user's approval
-//   production: knowledge base lookup -> script in 4 scenes
-//               -> (4 storyboard frames ‖ each scene's voices) -> 4 × 15s clips,
-//               each referencing its frame, voices and the previous clip
-//               -> stitched into one 60-second video
+//   production: knowledge base lookup -> script in 2 scenes -> visual plan
+//               (shot lists) -> 2 × 30s Kling clips that speak the lines
+//               themselves, each referencing the character images and the
+//               previous clip -> stitched into one 60-second video -> captions
 //
 // Research, scripts and storyboard images are temporary: runs nobody has
 // viewed for COLD_AFTER are pruned a few at a time.
@@ -20,9 +20,10 @@ import type { BookSummary } from './books.ts';
 import { clearKnowledge, deleteExpiredKnowledge, searchKnowledge, storeKnowledge } from './knowledge.ts';
 import { deleteStaleEmbeddings } from './embeddings.ts';
 import {
-  BACKUPS, cancelPrediction, download, generateImage, generatePremiumVideo, generateSpeech, generateText, generateVideo, MODELS, WRITER_CHAIN,
-  PREMIUM_LIMITS, uploadFile, VIDEO_LIMITS, withFallback,
+  BACKUPS, cancelPrediction, download, generateImage, generateText, generateVideo, MODELS, WRITER_CHAIN,
+  uploadFile, withFallback,
 } from './replicate.ts';
+import type { ClipReferences } from './replicate.ts';
 import { lastFrame, mediaSeconds, stitchClips } from './stitch.ts';
 import { addCaptions } from './captions.ts';
 import { addBannerTitle } from './typeset.ts';
@@ -43,62 +44,60 @@ const MAX_ATTEMPTS = 3;
 const CONCURRENCY = 4;
 const ARTICLES_TO_READ = 4;
 const BOOKS_TO_READ = 3;
-// A one-minute video's shape. Fast short-form narration is ~3 words a second,
-// so a scene's word range fills it with no dead air; its voices must also fit
-// the video model's reference-audio limit.
-const FORMATS = {
-  // 4 × 15 s clips (the standard video model's longest), up to 15 s of voice each.
-  standard: {
-    SCENES: 4, SCENE_SECONDS: 15, MIN_WORDS_PER_SCENE: 32, WORDS_PER_SCENE: 40,
-    MAX_SCENE_AUDIO_SECONDS: 14, AUDIO_LIMIT_SECONDS: VIDEO_LIMITS.maxTotalSeconds, MAX_AUDIO_CLIPS: VIDEO_LIMITS.audio,
-  },
-  // Premium: 2 × 30 s scenes on Seedance 2.5, up to 30 s of voice and 10 clips each.
-  premium: {
-    SCENES: 2, SCENE_SECONDS: 30, MIN_WORDS_PER_SCENE: 66, WORDS_PER_SCENE: 80,
-    MAX_SCENE_AUDIO_SECONDS: 29, AUDIO_LIMIT_SECONDS: PREMIUM_LIMITS.maxAudioSeconds, MAX_AUDIO_CLIPS: PREMIUM_LIMITS.audio,
-  },
-};
+// A one-minute video: 2 scenes, each one 30 s Kling clip. Clear, natural
+// narration is ~2 words a second, so a scene's word range fills it without
+// rushing.
+const SCENES = 2;
+const SCENE_SECONDS = 30;
+const MIN_WORDS_PER_SCENE = 55;
+const WORDS_PER_SCENE = 65;
+// When Kling fails a scene, the backups render it as two halves of this length.
+const HALF_SECONDS = 15;
 
-// Seedance 2.5 follows structured "production brief" prompts best, so premium
-// scripts plan every scene as a timecoded shot list.
-const PREMIUM_SCRIPT_RULES = (seconds: number) => `This is a premium video rendered by Seedance 2.5, which follows a precise shot list:
-- Each ${seconds}-second scene is one continuous sequence of 20-30 rapid shots, a new one every 0.5-1.5 seconds, following each fact as it is spoken.
-- Give every shot a timecode range (they cover 0-${seconds}s with no gaps), one camera move from the edit style above, what the character physically does, what fills the frame, and the sound effect that hits on it.
-- Every shot shows the fact being said at that moment; never cut to the character standing and talking.
-- Describe appearance through the references only (say "the character"), and keep lighting, palette and style the same in every shot.`;
+// Kling follows structured "production brief" prompts best, so every scene is
+// planned as a timecoded shot list.
+const SHOT_LIST_RULES = `Every ${SCENE_SECONDS}-second scene is one continuous clip with a timecoded shot list:
+- 20-30 rapid shots, a new one every 0.5-1.5 seconds, following each line as it is spoken.
+- Give every shot a timecode range (they cover 0-${SCENE_SECONDS}s with no gaps), one camera move from the edit style above, what the character physically does, what fills the frame, and the sound effect that hits on it.
+- Every shot shows what is being said at that moment; never cut to the character standing and talking.
+- Describe appearance through the reference images only (say "the character"), and keep lighting, palette and style the same in every shot.`;
 
-// A premium clip's prompt as a production brief: format, what each reference
-// is, the timecoded shot list, the exact lines and the sound.
-function premiumBrief(
-  sc: { video: string; frame: string; shots: string[]; sfx: string; lines: { name: string; text: string; say: string }[] },
-  index: number,
-  total: number,
-  seconds: number,
+type Line = { index: number; name: string; text: string };
+// pronounce: how to say the hard words, e.g. 'Nietzsche: NEE-chuh'.
+type Scene = { lines: Line[]; pronounce: string[]; video: string; shots: string[]; sfx: string; bridge: string };
+
+// A clip's prompt as a production brief: format, what each reference is, the
+// shot list, the exact lines with each speaker's voice, how to say the hard
+// words, and the sound. The model generates the speech itself, lip-synced.
+function clipBrief(
+  sc: Scene,
+  lines: Line[],
+  shots: string[],
+  part: { index: number; total: number; seconds: number; half?: 1 | 2 },
   style: string,
-  imageCount: number,
-  speakers: string[],
-  duo: boolean,
+  references: { images: number; previous: boolean },
+  voices: { name: string; voice: string }[],
 ): string {
   const legend = [
-    imageCount > 0 && `[Image1] is this scene's storyboard frame: match its location, props and composition.`,
-    imageCount > 1 && `[Image2] shows the character's exact look: keep their face, body, colours and outfit identical in every shot.`,
-    ...speakers.map((name, k) => `[Audio${k + 1}] is ${name}'s voice: use it for ${name}'s lines.`),
+    ...Array.from({ length: references.images }, (_, k) =>
+      `@image_${k + 1} shows the character's exact look: keep their face, body, colours and outfit identical in every shot.`),
+    references.previous && `@video_1 is the previous clip: carry its action, characters, voices and look straight on.`,
   ].filter(Boolean);
-  // The phonetic version, as the voices say it.
-  const dialogue = sc.lines.map((l) => (duo ? `${l.name}: "${l.say}"` : `"${l.say}"`));
+  const duo = voices.length === 2;
+  const dialogue = lines.map((l) => (duo ? `${l.name}: "${l.text}"` : `"${l.text}"`));
   return [
-    `FORMAT: vertical 9:16 short-form video, ${seconds} seconds, scene ${index + 1} of ${total}. Edited like a high-energy social media reel: rapid cuts every 0.5-1.5 seconds on a punchy beat, never the same camera angle twice in a row, no dead air.`,
+    `FORMAT: vertical 9:16 short-form video, ${part.seconds} seconds, scene ${part.index + 1} of ${part.total}${part.half ? `, part ${part.half} of 2` : ''}. Edited like a high-energy social media reel: rapid cuts every 0.5-1.5 seconds on a punchy beat, never the same camera angle twice in a row, no dead air.`,
     `STYLE: ${style}. Same lighting, palette and look throughout.`,
     legend.length > 0 && `REFERENCES:\n${legend.join('\n')}`,
-    `SCENE:\n${sc.video || sc.frame}`,
-    sc.shots.length > 0 && `SHOTS:\n${sc.shots.join('\n')}`,
-    dialogue.length > 0 && `DIALOGUE (spoken in this order, word for word, lip-synced, fast and punchy${speakers.length ? ', in the voices from the reference audio' : ''}):\n${dialogue.join('\n')}`,
-    `SOUND: punchy, well-timed sound effects on every action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
+    `SCENE:\n${sc.video}`,
+    shots.length > 0 && `SHOTS:\n${shots.join('\n')}`,
+    voices.length > 0 && `VOICES (the same in every clip):\n${voices.map((v) => `${v.name}: ${v.voice}`).join('\n')}`,
+    dialogue.length > 0 && `DIALOGUE (spoken out loud in this order, word for word, lip-synced, at a clear, natural, unhurried pace with a short pause between sentences, like a good documentary narrator; every word pronounced correctly and distinctly):\n${dialogue.join('\n')}`,
+    sc.pronounce.length > 0 && `PRONUNCIATION (say these words exactly like this):\n${sc.pronounce.join('\n')}`,
+    `SOUND: the dialogue, clear and upfront, with punchy, well-timed sound effects on every action${sc.sfx ? ` (${sc.sfx})` : ''} and subtle ambience mixed under it. No music.`,
     `RULES: The character moves and interacts with the scene; never just stands talking to camera. No on-screen text, subtitles, logos or watermarks.`,
   ].filter(Boolean).join('\n\n');
 }
-const FAST = 'Fast-paced, high-energy delivery, like a viral short: quick and punchy, no pauses between sentences.';
-const FASTER = 'Speak even faster, rapid-fire, with no pauses at all.';
 
 // What makes short-form videos travel. Used when picking topics and writing scripts.
 const VIRAL_RULES = `What makes a short go viral:
@@ -622,7 +621,7 @@ What made these perform well, and what is worth using? Reply with JSON only:
 function voiceStyle(character: string): string {
   const voice = character.match(/^Voice:\s*(.+)$/im)?.[1];
   const personality = character.match(/^Personality:\s*(.+)$/im)?.[1];
-  return [voice, personality, FAST].filter(Boolean).join(' ');
+  return [voice, personality].filter(Boolean).join(' ');
 }
 
 // The bot's character images, uploaded so the image model can match them: the
@@ -794,9 +793,6 @@ async function drawCharacter(run: RunRow) {
 }
 
 async function produce(run: RunRow) {
-  const {
-    SCENES, SCENE_SECONDS, MIN_WORDS_PER_SCENE, WORDS_PER_SCENE, MAX_SCENE_AUDIO_SECONDS, AUDIO_LIMIT_SECONDS, MAX_AUDIO_CLIPS,
-  } = run.premium ? FORMATS.premium : FORMATS.standard;
   const bot = await loadBot(run.bot_id);
   const characters = charactersOf(bot);
   const findings = await parentResult<Findings>(run.parent_run_id);
@@ -843,7 +839,7 @@ Then explain the topic, so a curious 12-year-old finishes the video actually und
 - Each scene teaches one clear step of the explanation, building on the last, so the scenes together answer the hook's question from start to finish.
 - Use an everyday comparison for anything abstract ("like a rubber band stretched until it snaps").
 - Every sentence is a complete, grammatical thought that follows from the one before. No fragments, no slogans, no lone buzzwords, no non-sequiturs or in-jokes the viewer can't follow (never "Turtles all the way down.").
-- Fast but clear: sentences of about 8-15 words, spoken punchily. No filler, no recaps, no "let's", "basically", "you see", "now here's the thing".
+- Clear and natural: sentences of about 8-15 words, easy to say out loud at a normal pace. No filler, no recaps, no "let's", "basically", "you see", "now here's the thing".
 - Every scene's lines fill its whole ${SCENE_SECONDS} seconds: between ${MIN_WORDS_PER_SCENE} and ${WORDS_PER_SCENE} words per scene, no more, no less. No dead air.
 - Each scene ends on a cliffhanger that makes the next step feel urgent ("But that's not the worst part.").
 
@@ -853,10 +849,9 @@ The scenes are one chain, never a list of separate facts:
 - Keep one open loop running from the hook and pay it off at the very end with a clear answer the viewer now understands. No "like and subscribe", no outro.
 - Only facts from the research; never invent statistics or names.
 
-Pronunciation: the voice model reads "say" exactly as written, so it is the same line respelled phonetically wherever a word could be mispronounced:
-- Names, places, foreign and scientific words in simple English sounds with hyphens and the stressed syllable in capitals ("Qin Shi Huang" → "Chin Shur HWAHNG", "Nietzsche" → "NEE-chuh", "hemocyanin" → "hee-moh-SY-uh-nin").
-- Numbers, dates, units, symbols and abbreviations written out as spoken ("1,200 km" → "twelve hundred kilometers", "1347" → "thirteen forty-seven", "NASA" → "NASA", "DNA" → "D N A", "°C" → "degrees Celsius").
-- Every other word unchanged. "text" stays the normal, correctly spelled line.
+Write for the ear: the video model speaks your lines exactly as written.
+- Numbers, units, symbols and abbreviations written the way they're said ("twelve hundred kilometers", "thirteen forty-seven", "D N A", "degrees Celsius").
+- For each scene, list the names, places, foreign or scientific words a narrator could mispronounce, with how to say them in simple English sounds, the stressed syllable in capitals ("Nietzsche: NEE-chuh", "Qin Shi Huang: chin shur HWAHNG", "hemocyanin: hee-moh-SY-uh-nin"). Only the hard words; leave the list empty if there are none. The lines themselves keep the normal spelling.
 
 Reply with JSON only:
 {
@@ -866,7 +861,7 @@ Reply with JSON only:
   "hooks": ["5 candidate opening lines, each under 12 words"],
   "ideas": [{"title": "...", "hook": "a scroll-stopping first line"}, 3 alternative angles, best first],
   "scenes": [
-    {"voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line", "say": "the same line, respelled phonetically"}, ...${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words in total for this scene${characters.length === 2 ? ', a back-and-forth between both characters' : ''}]},
+    {"voiceLines": [{"speaker": ${characters.length === 2 ? '1 or 2' : '1'}, "text": "a spoken line"}, ...${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words in total for this scene${characters.length === 2 ? ', a back-and-forth between both characters' : ''}], "pronounce": [{"word": "a hard word from this scene", "sounds": "how to say it, e.g. NEE-chuh"}, ...only the hard words, or none]},
     ...exactly ${SCENES} scenes, the first one opening with the strongest hook
   ]
 }`;
@@ -874,13 +869,19 @@ Reply with JSON only:
     .map((l: unknown) => (l && typeof l === 'object' ? (l as Record<string, unknown>) : {}))
     .map((l) => {
       const who = characters.find((c) => c.index === (Number(l.speaker) === 2 ? 1 : 0)) ?? characters[0];
-      const text = spokenOnly(str(l.text));
-      return { index: who?.index ?? 0, name: who?.name ?? bot.name, text, say: spokenOnly(str(l.say)) || text };
+      return { index: who?.index ?? 0, name: who?.name ?? bot.name, text: spokenOnly(str(l.text)) };
     })
     .filter((l) => l.text);
   const draftScenes = (draft: Record<string, unknown>) => (Array.isArray(draft.scenes) ? draft.scenes : [])
-    .map((sc: unknown) => toLines(sc && typeof sc === 'object' ? (sc as Record<string, unknown>).voiceLines : null))
-    .filter((lines) => lines.length > 0)
+    .map((sc: unknown) => (sc && typeof sc === 'object' ? (sc as Record<string, unknown>) : {}))
+    .map((sc) => ({
+      lines: toLines(sc.voiceLines),
+      pronounce: (Array.isArray(sc.pronounce) ? sc.pronounce : [])
+        .map((p: unknown) => (p && typeof p === 'object' ? (p as Record<string, unknown>) : {}))
+        .filter((p) => str(p.word) && str(p.sounds))
+        .map((p) => `${str(p.word)}: ${str(p.sounds)}`),
+    }))
+    .filter((sc) => sc.lines.length > 0)
     .slice(0, SCENES);
   const wordCount = (lines: { text: string }[]) => lines.map((l) => l.text).join(' ').split(/\s+/).filter(Boolean).length;
   // How far a draft is from the target: missing scenes count as empty ones.
@@ -892,8 +893,8 @@ Reply with JSON only:
   // A draft with missing scenes, or scenes that would leave dead air or run
   // over, is sent back once; the closer of the two drafts is kept.
   let written = await askJson(scriptPrompt, 6000);
-  let sceneLines = draftScenes(written);
-  const counts = sceneLines.map(wordCount);
+  let drafted = draftScenes(written);
+  const counts = drafted.map((sc) => wordCount(sc.lines));
   const tooShort = counts.some((n) => n < MIN_WORDS_PER_SCENE * 0.85);
   const tooLong = counts.some((n) => n > WORDS_PER_SCENE * 1.2);
   if (counts.length < SCENES || tooShort || tooLong) {
@@ -904,12 +905,13 @@ Reply with JSON only:
     ].filter(Boolean).join(', ');
     await step(run.id, 'write', 'Tightening the script', `Scenes ran ${counts.join(', ')} words; each needs ${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} to fill ${SCENE_SECONDS} seconds.`);
     const retry = await askJson(`${scriptPrompt}\n\nYour last draft had scenes of ${counts.join(', ')} words: ${problem}. Write exactly ${SCENES} scenes of ${MIN_WORDS_PER_SCENE}-${WORDS_PER_SCENE} words each, keeping the same explanation.`, 6000);
-    const retryLines = draftScenes(retry);
-    if (retryLines.length > 0 && offBy(retryLines) <= offBy(sceneLines)) {
+    const redrafted = draftScenes(retry);
+    if (redrafted.length > 0 && offBy(redrafted.map((sc) => sc.lines)) <= offBy(drafted.map((sc) => sc.lines))) {
       written = retry;
-      sceneLines = retryLines;
+      drafted = redrafted;
     }
   }
+  const sceneLines = drafted.map((sc) => sc.lines);
   if (sceneLines.length === 0) throw new Error(`${MODELS.writer} didn’t write any scenes.`);
 
   const production: Production = {
@@ -933,43 +935,10 @@ Reply with JSON only:
   await step(run.id, 'write', `Wrote “${production.title}” in ${sceneLines.length} scenes`, production.ideas.map((i) => `• ${i.title}`).join('\n'));
   await clearKnowledge(researchId); // the knowledge base was only needed for the script
 
-  // 2. At the same time: the voices are recorded from the finished script, and
-  // the visuals are planned from it (then each scene's storyboard frame drawn).
-  // Voices: one clip per character per scene, always in that character's own
-  // preset speaker so the voice never changes between scenes or videos. They
-  // read the phonetic "say" version of each line.
-  const voiceJobs = sceneLines.flatMap((lines, s) => characters
-    .map((c) => ({ scene: s, character: c, text: lines.filter((l) => l.index === c.index).map((l) => l.say).join(' ') }))
-    .filter((j) => j.text));
-  const voices: ({ url: string; seconds: number; mediaId: string } | null)[] = voiceJobs.map(() => null);
-  const record = async (k: number, faster: boolean) => {
-    const j = voiceJobs[k];
-    const url = await generateSpeech(j.text, j.character.speaker, [voiceStyle(j.character.text), faster && FASTER].filter(Boolean).join(' '));
-    const saved = await saveMedia(run.id, 'audio', `Scene ${j.scene + 1} — ${j.character.name}`, url);
-    const previous = voices[k];
-    if (previous) await pool.query('DELETE FROM run_media WHERE id = $1', [previous.mediaId]);
-    voices[k] = { url, seconds: await mediaSeconds(saved.data), mediaId: saved.id };
-    return url;
-  };
-  if (voiceJobs.length > 0) {
-    await step(
-      run.id,
-      'audio',
-      `Recording ${voiceJobs.length} voice clip${voiceJobs.length === 1 ? '' : 's'}`,
-      `Using ${MODELS.voice} · ${characters.map((c) => `${c.name}: ${c.speaker}`).join(' · ')}`,
-    );
-  }
-  const recording = Promise.all(voiceJobs.map((j, k) => attempt(run.id, `Couldn’t record ${j.character.name} for scene ${j.scene + 1}`, async () => {
-    const url = await record(k, false);
-    const voicesInScene = voiceJobs.filter((v) => v.scene === j.scene).length;
-    await charge(bot.user_id, run.id, Math.round(PRICES.sceneVoice / voicesInScene), `Scene ${j.scene + 1} voice`);
-    await step(run.id, 'audio', `Scene ${j.scene + 1}: ${j.character.name}’s voice recorded (${voices[k]?.seconds.toFixed(1)}s)`);
-    return url;
-  })));
-
-  const planVisuals = async () => {
-    await step(run.id, 'write', 'Planning the visuals for each line');
-    const visualsPrompt = `${persona(bot)}
+  // 2. The visuals, planned from the finished script: each scene's shot list
+  // and video prompt, in step with its lines.
+  await step(run.id, 'write', 'Planning the visuals for each line');
+  const visualsPrompt = `${persona(bot)}
 
 Topic: ${findings.topic}
 
@@ -979,7 +948,9 @@ ${sceneLines.map((lines, i) => `<scene number="${i + 1}">\n${lines.map((l) => (c
 ${SHOW_DONT_TELL}
 
 ${EDIT_STYLE}
-${run.premium ? `\n${PREMIUM_SCRIPT_RULES(SCENE_SECONDS)}\n` : ''}
+
+${SHOT_LIST_RULES}
+
 Plan the visuals for this script. Every moment of each clip shows exactly what is being said at that moment, in the order it is said, so the viewer sees each explanation as they hear it.
 - The camera follows the script's thread: each scene ends on an object, place or motion that the next scene opens on (a match cut, e.g. zooming into the flea's mouth → opening inside the bloodstream).
 - Don't change or add to the script's words.
@@ -992,35 +963,29 @@ Reply with JSON only:
       "location": "the specific place this scene happens, in a few words (e.g. 'inside a human artery', 'a foggy cursed village at midnight')",
       "example": "the concrete example on screen that shows this scene's point",
       "action": "what the character physically does in the scene (never just standing and talking)",
-      "frame": "an image prompt for this scene's key frame: you mid-action in the location, with the example clearly visible, as described in Look",${run.premium ? `
-      "shots": [{"time": "0-1.5s", "camera": "one camera move", "action": "what happens and what the character does, matching the line spoken then", "sfx": "the sound on this shot"}, ...20-30 shots of 0.5-1.5s each covering 0-${SCENE_SECONDS}s],` : ''}
+      "shots": [{"time": "0-1.5s", "camera": "one camera move", "action": "what happens and what the character does, matching the line spoken then", "sfx": "the sound on this shot"}, ...20-30 shots of 0.5-1.5s each covering 0-${SCENE_SECONDS}s],
       "video": "a prompt for this ${SCENE_SECONDS}-second clip written in the edit style above, with its objects and mood filled in from this scene's lines: the shot sequence in step with what is said, camera moves and transitions, the character's movement and reactions; it opens mid-action and ends on the pull-back wide shot that hands over to the next scene"
     },
     ...exactly ${sceneLines.length} scenes, one per script scene, in order
   ]
 }`;
-    const planned = await askJson(visualsPrompt, 6000);
-    return Array.isArray(planned.scenes) ? planned.scenes : [];
-  };
-
-  const visuals = planVisuals().then((planned) => sceneLines.map((lines, i) => {
-    const raw = planned[i];
+  const planned = await askJson(visualsPrompt, 8000);
+  const scenes: Scene[] = sceneLines.map((lines, i) => {
+    const raw = Array.isArray(planned.scenes) ? planned.scenes[i] : null;
     const sc = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-    // A scene the plan left out still gets a prompt: its lines, shown.
-    const fallback = `The character acts out and shows on screen: ${lines.map((l) => l.text).join(' ')}`;
-    // The where, what and doing go into both prompts so the models stage the
-    // scene rather than drawing a presenter.
+    // The where, what and doing go into the prompt so the model stages the
+    // scene rather than filming a presenter.
     const staging = [
       str(sc.location) && `Location: ${str(sc.location)}.`,
       str(sc.example) && `On screen: ${str(sc.example)}.`,
       str(sc.action) && `The character: ${str(sc.action)}.`,
     ].filter(Boolean).join(' ');
-    const withStaging = (prompt: string) => (prompt && staging ? `${prompt}\n${staging}` : prompt);
-    const video = withStaging(str(sc.video, fallback));
+    // A scene the plan left out still gets a prompt: its lines, acted out.
+    const video = str(sc.video, `The character acts out and shows on screen: ${lines.map((l) => l.text).join(' ')}`);
     return {
       lines,
-      frame: withStaging(str(sc.frame, fallback)),
-      video: `${video}\nThe character is moving and interacting with the scene, not standing still talking to the camera.`,
+      pronounce: drafted[i].pronounce,
+      video: [video, staging, 'The character is moving and interacting with the scene, not standing still talking to the camera.'].filter(Boolean).join('\n'),
       bridge: str(sc.bridge),
       sfx: str(sc.sfx),
       shots: (Array.isArray(sc.shots) ? sc.shots : [])
@@ -1036,181 +1001,83 @@ Reply with JSON only:
         i > 0 && all[i - 1].bridge && `Opens exactly where the previous clip ended: ${all[i - 1].bridge}`,
         sc.video,
         i < all.length - 1 && sc.bridge && `Ends on: ${sc.bridge}`,
-        // MiniMax generates the clip's sound; ask for punchy effects under the voice.
-        // (Premium briefs carry their own SOUND section.)
-        !run.premium && `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
       ].filter(Boolean).join('\n'),
-    })));
+    }));
+  await step(run.id, 'write', `Planned ${scenes.length} scenes, ${scenes.reduce((n, sc) => n + sc.shots.length, 0)} shots`);
 
-  const drawing = visuals.then(async (planned) => {
-    await step(run.id, 'image', `Drawing ${planned.length} storyboard frames`, `Using ${MODELS.image}`);
-    return Promise.all(planned.map((sc, i) => attempt(run.id, `Couldn’t draw frame ${i + 1}`, async () => {
-      const url = await generateImage(original(`${sc.frame || sc.video}\nStyle: ${styleOf(bot)}`), references);
-      await saveMedia(run.id, 'image', `Scene ${i + 1}`, url);
-      await charge(bot.user_id, run.id, PRICES.frame, `Storyboard frame ${i + 1}`);
-      await step(run.id, 'image', `Scene ${i + 1} frame drawn`);
-      return url;
-    })));
-  });
-  const [scenes, frameUrls] = await Promise.all([visuals, drawing, recording]);
-
-  // The video model takes limited reference audio per clip (15 s, or 30 s for
-  // premium), so a scene that runs long is re-recorded once at a faster pace
-  // (no extra charge).
-  const sceneSeconds = (s: number) => voiceJobs.reduce((sum, j, k) => sum + (j.scene === s ? voices[k]?.seconds ?? 0 : 0), 0);
-  await Promise.all(scenes.map(async (_, s) => {
-    const before = sceneSeconds(s);
-    if (before <= MAX_SCENE_AUDIO_SECONDS) return;
-    await step(run.id, 'audio', `Scene ${s + 1}’s lines run ${before.toFixed(1)}s, re-recording a little faster`);
-    await Promise.all(voiceJobs.map((j, k) => (j.scene === s && voices[k]
-      ? attempt(run.id, `Couldn’t re-record ${j.character.name} for scene ${s + 1}`, () => record(k, true))
-      : null)));
-    await step(run.id, 'audio', `Scene ${s + 1} now runs ${sceneSeconds(s).toFixed(1)}s`);
-  }));
-
-  // The clips that fit the video model's limits: at least 2 s each, within
-  // the scene's reference-audio total.
-  const sceneAudio = (s: number) => {
-    const fit: string[] = [];
-    const skipped: string[] = [];
-    const speakers: string[] = []; // whose voice each fitting clip is, in order
-    let total = 0;
-    voiceJobs.forEach((j, k) => {
-      const v = voices[k];
-      if (j.scene !== s || !v) return;
-      if (v.seconds >= VIDEO_LIMITS.minClipSeconds && total + v.seconds <= AUDIO_LIMIT_SECONDS && fit.length < MAX_AUDIO_CLIPS) {
-        fit.push(v.url);
-        speakers.push(j.character.name);
-        total += v.seconds;
-      } else {
-        skipped.push(`${j.character.name} (${v.seconds.toFixed(1)}s)`);
-      }
-    });
-    return { fit, skipped, speakers };
-  };
-
-  // Clips one after another: each takes its frame (plus the opening frame, to
-  // keep the character consistent), its voices and the dialogue to speak, and
-  // the previous clip as a reference video (when it's within the 15 s
-  // reference-video limit), so the action carries on. (The Pruna backup opens
-  // on the previous clip's last frame instead.)
+  // 3. The clips, one after another. Kling speaks the lines itself (lip-synced,
+  // with a guide for the hard words) and adds the sound effects. Each clip gets the
+  // bot's character images and the previous clip as references, so the
+  // character, voices and action carry on.
+  const voices = characters.map((c) => ({ name: c.name, voice: voiceStyle(c.text) }));
+  const style = styleOf(bot);
   const clips: { data: Buffer; id: string }[] = [];
-  let previousUrl: string | null = null;
-  let firstFrame: string | null = null; // data URL of the previous clip's last frame, for Pruna
+  let previous: ClipReferences['previous'] = null;
+  let firstFrame: string | null = null; // the previous clip's last frame, for the Pruna backup
 
-  // Renders one clip with the standard models (or the given ones), keeping it
-  // as the next clip's reference.
-  const renderClip = async (
-    label: string, prompt: string, images: string[], audio: string[], seconds: number, models?: string[],
-  ) => {
-    const clipUrl = await generateVideo(
-      original(prompt), { images, audio, videos: previousUrl ? [previousUrl] : [], firstFrame }, seconds, models,
-    );
-    await keepClip(label, clipUrl, PRICES.clip);
-    return clipUrl;
-  };
   const keepClip = async (label: string, clipUrl: string, price: number) => {
     const clip = await saveMedia(run.id, 'video', label, clipUrl);
     clips.push(clip);
     await charge(bot.user_id, run.id, price, label);
-    const seconds = await mediaSeconds(clip.data).catch(() => Infinity);
-    previousUrl = seconds <= VIDEO_LIMITS.maxTotalSeconds ? clipUrl : null;
+    previous = { url: clipUrl, seconds: await mediaSeconds(clip.data).catch(() => Infinity) };
     // Inline, since uploaded files need a login that some models can't use.
     firstFrame = await lastFrame(clip.data).then((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`).catch(() => null);
     await step(run.id, 'video', `${label} ready`);
   };
 
-  // Premium scenes whose Seedance render failed are made as two 15 s halves
-  // with H3 Lite, then Pruna. Each half's lines are re-voiced so they fit
-  // those models' 15 s of reference audio.
-  const FALLBACK_SECONDS = 15;
-  const fallbackScene = async (i: number, sc: (typeof scenes)[number], images: string[]) => {
-    // Split as spoken (the phonetic version), since these go to the voice and video models.
-    const sentences = sc.lines.flatMap((l) => (l.say.match(/[^.!?]+[.!?]*/g) ?? [l.say])
+  // A scene Kling couldn't render is made as two 15 s halves with the backups,
+  // split between sentences so each half speaks its own lines.
+  const shotStart = (shot: string) => Number(/^(\d+(?:\.\d+)?)/.exec(shot)?.[1] ?? 0);
+  const renderHalves = async (i: number, sc: Scene) => {
+    const sentences = sc.lines.flatMap((l) => (l.text.match(/[^.!?]+[.!?]*/g) ?? [l.text])
       .map((t) => ({ ...l, text: t.trim() })).filter((t) => t.text));
     const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
     const total = sentences.reduce((n, t) => n + words(t.text), 0);
     let split = 0;
     for (let n = 0; split < sentences.length - 1 && n + words(sentences[split].text) <= total / 2; split++) n += words(sentences[split].text);
     const halves = [sentences.slice(0, Math.max(split, 1)), sentences.slice(Math.max(split, 1))];
-    const shotStart = (shot: string) => Number(/^(\d+)/.exec(shot)?.[1] ?? 0);
     for (const [h, lines] of halves.entries()) {
       const label = `Clip ${i + 1}, part ${h + 1}`;
-      await step(run.id, 'video', `Rendering ${label.toLowerCase()} (${FALLBACK_SECONDS}s)`, `Using ${BACKUPS.premiumVideo.join(', then ')}.`);
+      await step(run.id, 'video', `Rendering ${label.toLowerCase()} (${HALF_SECONDS}s)`, `Using ${BACKUPS.video.join(', then ')}.`);
+      const shots = sc.shots.filter((shot) => (shotStart(shot) < HALF_SECONDS) === (h === 0));
+      const prompt = clipBrief(
+        sc, lines, shots, { index: i, total: scenes.length, seconds: HALF_SECONDS, half: (h + 1) as 1 | 2 },
+        style, { images: 0, previous: false }, voices,
+      );
       await attempt(run.id, `Couldn’t render ${label.toLowerCase()}`, async () => {
-        // This half's voices, re-recorded faster once if they run long.
-        const audio: string[] = [];
-        let used = 0;
-        for (const c of characters) {
-          const text = lines.filter((l) => l.index === c.index).map((l) => l.text).join(' ');
-          if (!text) continue;
-          const say = async (faster: boolean) => {
-            const url = await generateSpeech(text, c.speaker, [voiceStyle(c.text), faster && FASTER].filter(Boolean).join(' '));
-            const saved = await saveMedia(run.id, 'audio', `Scene ${i + 1}, part ${h + 1} — ${c.name}`, url);
-            return { url, seconds: await mediaSeconds(saved.data).catch(() => Infinity) };
-          };
-          let voice = await say(false);
-          if (voice.seconds > FALLBACK_SECONDS - 1) voice = await say(true);
-          if (voice.seconds >= VIDEO_LIMITS.minClipSeconds && used + voice.seconds <= VIDEO_LIMITS.maxTotalSeconds
-            && audio.length < VIDEO_LIMITS.audio) {
-            audio.push(voice.url);
-            used += voice.seconds;
-          }
-        }
-        const half = sc.shots.filter((shot) => (shotStart(shot) < FALLBACK_SECONDS) === (h === 0));
-        const dialogue = lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.text}”` : `“${l.text}”`)).join('\n');
-        const prompt = [
-          sc.video || sc.frame,
-          `This is part ${h + 1} of 2 of this scene.`,
-          half.length > 0 && `Shots:\n${half.join('\n')}`,
-          `Sound: punchy, well-timed sound effects that match the action${sc.sfx ? ` (${sc.sfx})` : ''}, with subtle ambience, always mixed under the dialogue so every word stays clear. No music.`,
-          dialogue && `Spoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`,
-        ].filter(Boolean).join('\n\n');
-        return renderClip(label, prompt, images, audio, FALLBACK_SECONDS, BACKUPS.premiumVideo);
+        const clipUrl = await generateVideo(original(prompt), { images: [], previous, firstFrame }, HALF_SECONDS, BACKUPS.video);
+        await keepClip(label, clipUrl, Math.round(PRICES.clip / 2));
+        return clipUrl;
       });
     }
   };
 
-  let seedanceFailed = false; // once it fails, the rest of the video uses the fallback
   for (const [i, sc] of scenes.entries()) {
-    const images = [...new Set([frameUrls[i], frameUrls[0]].filter((u): u is string => u !== null))];
-    if (run.premium && seedanceFailed) {
-      await fallbackScene(i, sc, images);
-      continue;
-    }
-    const { fit: audio, skipped, speakers } = sceneAudio(i);
+    const carryOn = previous !== null;
     await step(
       run.id,
       'video',
       `Rendering clip ${i + 1} of ${scenes.length} (${SCENE_SECONDS}s)`,
       [
-        `Using ${run.premium ? MODELS.premiumVideo : MODELS.video}`,
-        images.length && `${images.length} reference image${images.length === 1 ? '' : 's'}`,
-        audio.length && `${audio.length} voice clip${audio.length === 1 ? '' : 's'}`,
-        !run.premium && previousUrl && 'carrying on from the previous clip',
-      ].filter(Boolean).join(', ') + '. This usually takes a few minutes.'
-        + (skipped.length ? `\nLeft out of the voice reference (outside its length limits): ${skipped.join(', ')}` : ''),
+        `Using ${MODELS.video}`,
+        references.length && `${references.length} character image${references.length === 1 ? '' : 's'}`,
+        carryOn && 'carrying on from the previous clip',
+      ].filter(Boolean).join(', ') + '. This usually takes several minutes.',
     );
-    const dialogue = sc.lines.map((l) => (characters.length === 2 ? `${l.name}: “${l.say}”` : `“${l.say}”`)).join('\n');
+    const prompt = clipBrief(
+      sc, sc.lines, sc.shots, { index: i, total: scenes.length, seconds: SCENE_SECONDS },
+      style, { images: references.length, previous: carryOn }, voices,
+    );
     // A failed clip leaves the last good one as the next clip's reference.
-    if (run.premium) {
-      const prompt = premiumBrief(sc, i, scenes.length, SCENE_SECONDS, styleOf(bot), images.length, speakers, characters.length === 2);
-      const rendered = await attempt(run.id, `Seedance couldn’t render clip ${i + 1}`, async () => {
-        const clipUrl = await generatePremiumVideo(original(prompt), { images, audio }, SCENE_SECONDS);
-        await keepClip(`Clip ${i + 1}`, clipUrl, PRICES.premiumClip);
-        return clipUrl;
-      });
-      if (!rendered) {
-        seedanceFailed = true;
-        await step(run.id, 'video', `Switching to ${BACKUPS.premiumVideo.join(', then ')} for the rest of the video`);
-        await fallbackScene(i, sc, images);
-      }
-      continue;
+    const rendered = await attempt(run.id, `${MODELS.video} couldn’t render clip ${i + 1}`, async () => {
+      const clipUrl = await generateVideo(original(prompt), { images: references, previous, firstFrame }, SCENE_SECONDS);
+      await keepClip(`Clip ${i + 1}`, clipUrl, PRICES.clip);
+      return clipUrl;
+    });
+    if (!rendered) {
+      await step(run.id, 'video', `Switching to ${BACKUPS.video.join(', then ')} for clip ${i + 1}`);
+      await renderHalves(i, sc);
     }
-    const prompt = dialogue
-      ? `${sc.video || sc.frame}\n\nSpoken in this order, lip-synced${audio.length ? ', in the voices from the reference audio' : ''}:\n${dialogue}`
-      : sc.video || sc.frame;
-    await attempt(run.id, `Couldn’t render clip ${i + 1}`, () => renderClip(`Clip ${i + 1}`, prompt, images, audio, SCENE_SECONDS));
   }
 
   // Stitch into one video; the separate clips are then dropped to save space.
